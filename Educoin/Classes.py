@@ -3,6 +3,13 @@ import hashlib
 from datetime import datetime, timezone
 import requests  # usado nos métodos de rede do No
 
+def gerar_id_usuario():
+    """
+    Gera um identificador único para usuários.
+    Útil para preencher o campo id_usuario em Pessoa/Aluno/etc.
+    """
+    return str(uuid.uuid4())
+
 class Pessoa:
     def __init__(self, nome, cpf, email, senha,
                  chave_pri, chave_pub, qtd_moedas=0, categoria=None, id_usuario=None):
@@ -408,6 +415,46 @@ class No:
     # -----------------------
     # Métodos de rede / P2P
     # -----------------------
+    def sincronizar_blockchain_com_peer(self, peer, timeout=3.0):
+        """
+        Sincroniza a blockchain local com a de um peer.
+        Regra simples:
+        - faz GET em /blockchain no peer;
+        - se a cadeia recebida for maior e válida, substitui a local;
+        - senão, mantém a cadeia atual.
+        Retorna True se trocou de cadeia, False caso contrário.
+        """
+        ip, porta = peer
+        url = f"http://{ip}:{porta}/blockchain"
+        try:
+            resp = requests.get(url, timeout=timeout)
+            if resp.status_code != 200:
+                return False
+
+            data = resp.json()
+            if not isinstance(data, list):
+                return False
+
+            # Constrói nova cadeia a partir do JSON
+            nova_chain = [Bloco.from_dict(b) for b in data]
+
+            # Só troca se a nova for maior
+            if len(nova_chain) <= len(self.blockchain):
+                return False
+
+            blockchain_antiga = self.blockchain
+            self.blockchain = nova_chain
+
+            # Garante que a nova cadeia é consistente
+            if not self.validar_blockchain():
+                # Reverte se a nova for inválida
+                self.blockchain = blockchain_antiga
+                return False
+
+            return True
+
+        except Exception:
+            return False
 
     def adicionar_peer(self, ip, porta):
         """Adiciona um peer (ip, porta) à lista, se ainda não existir."""
