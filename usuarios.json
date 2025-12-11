@@ -1,0 +1,11 @@
+[
+  {
+    "id_usuario": "617d562a-4ae1-4bdf-8124-6836083e765c",
+    "nome": "Leonardo",
+    "email": "leleloleo@gmail.com",
+    "senha": "1234",
+    "tipo": "ALUNO",
+    "chave_pub": "PUB-eita",
+    "chave_pri": "PRI-ata"
+  }
+]

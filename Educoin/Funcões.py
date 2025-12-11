@@ -1,581 +1,211 @@
-# Funcões.py
 """
-Nó do anel com eleição, mural distribuído e relógio vetorial,
- + integração com as classes de blockchain/Educoin do arquivo Classes.py.
+Funcões.py
+Servidor HTTP de um nó da rede EDUCOIN em anel.
+
+Responsável por:
+- Eleição em anel (/iniciaeleicao, /eleicao, /eleito, /leader)
+- Mural distribuído (/mural)
+- Blockchain EDUCOIN (/saldo, /blockchain, /historico, /tx, /transferir, /minerar)
+- Validação de transferência com chave privada
 """
 
-import http.server
-import socketserver
 import json
-import requests
-import threading
-import uuid
 import logging
-from typing import List, Dict, Optional
-import time
+import os
 import random
+import threading
+import time
+import uuid
+from http.server import BaseHTTPRequestHandler
+from socketserver import ThreadingTCPServer
+from typing import Dict, List, Optional
 from urllib.parse import urlparse, parse_qs
 
-# >>> IMPORTA AS CLASSES DE MODELO <<<
-from Classes import No, Eleicao as EleicaoLogica, MoedaConfig, Transacao, Aluno
+import requests
 
-# ========== CONFIG ==========
-NODE_ID: int = random.randint(1, 10000)  # ID aleatório do nó
-PORT: int = 8001                         # mude se precisar
+from Classes import No, Transacao, MoedaConfig, Eleicao
 
-# URL do próximo nó no anel (ajuste conforme topologia)
-noh_conectado: str = "http://10.80.40.253:8000"
+# --------------------------------------------------------------------
+# Configuração global do nó
+# --------------------------------------------------------------------
 
-lider: Optional[int] = None
-participante: bool = False
-mural: List[Dict] = []  # mural compartilhado (lista de mensagens únicas)
-# ============================
+NODE_ID: int = random.randint(1000, 9999)
+PORT: int = 8001          # pode mudar para rodar vários nós
+IP_LOCAL: str = "127.0.0.1"
 
-lock = threading.Lock()
-TIMEOUT_S = 3
-REQUEST_RETRIES = 2   # tentativas de POST
-SYNC_INTERVAL_S = 5   # intervalo para o líder sincronizar com o próximo nó
+# Próximo nó no anel (editável pela interface)
+noh_conectado: str = f"http://{IP_LOCAL}:{PORT}"
 
-logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
+# Arquivo de usuários (compartilhado com a GUI)
+USERS_FILE = "usuarios.json"
 
-# Reutilizar sessão HTTP
-session = requests.Session()
+# Relógio vetorial + mural
+vc: Dict[str, int] = {}
+mural: List[Dict] = []
 
-# ========== RELÓGIO VETORIAL ==========
-# dicionário esparso {node_id: counter}
-vector_clock: Dict[int, int] = {}
+participante: bool = False       # se já está participando da eleição
+lider: Optional[int] = None      # NODE_ID do líder atual, se existir
 
+# --------------------------------------------------------------------
+# Blockchain / Moeda
+# --------------------------------------------------------------------
 
-def vc_increment():
-    """Incrementa a entrada do NODE_ID no relógio vetorial (evento local/envio)."""
-    with lock:
-        vector_clock[NODE_ID] = vector_clock.get(NODE_ID, 0) + 1
-        logging.debug(f"VC incrementado: {vector_clock}")
+# Moeda EDUCOIN com supply máximo
+try:
+    moeda_config = MoedaConfig(
+        nome="EDUCOIN",
+        lista_chaves_pub_autorizadas=None,
+        time_limit=None,
+        max_supply=100_000,
+    )
+except TypeError:
+    # fallback se a assinatura for diferente
+    moeda_config = MoedaConfig("EDUCOIN", None, None, 100_000)
 
+eleicao_logica = Eleicao(ip_inicial=str(NODE_ID))
 
-def vc_merge(received_vc: Optional[Dict]):
-    """
-    Faz o merge entre o vector clock local e o recebido (max por posição),
-    e depois incrementa o relógio local (regra de recebimento).
-    """
-    if not received_vc:
-        return
+# Usuário local não é usado diretamente aqui,
+# a GUI trabalha com os usuários de usuarios.json
+usuario_local = None
 
-    with lock:
-        for k_str, v in received_vc.items():
-            # chaves podem vir como string pelo JSON
-            try:
-                k = int(k_str)
-            except Exception:
-                continue
-            if not isinstance(v, int):
-                try:
-                    v = int(v)
-                except Exception:
-                    continue
-            current = vector_clock.get(k, 0)
-            if v > current:
-                vector_clock[k] = v
-
-        # incremento local depois de receber
-        vector_clock[NODE_ID] = vector_clock.get(NODE_ID, 0) + 1
-        logging.debug(f"VC mesclado e incrementado após recebimento: {vector_clock}")
-
-
-def vc_get_copy() -> Dict[str, int]:
-    """Retorna uma cópia do vector clock com chaves string (pronto para JSON)."""
-    with lock:
-        return {str(k): int(v) for k, v in vector_clock.items()}
-
-
-# =====================================================
-#        INTEGRAÇÃO COM Classes.py (EduCoin / No)
-# =====================================================
-
-# Configuração básica da moeda EDUCOIN (máx 100.000)
-moeda_config = MoedaConfig(nome="EDUCOIN", max_supply=100_000)
-
-# Usuário local deste nó (por enquanto um Aluno "fake" só pra ter chave)
-usuario_local = Aluno.cadastrar_aluno(
-    nome=f"Aluno-{NODE_ID}",
-    cpf="00000000000",
-    email=f"aluno{NODE_ID}@if.edu",
-    senha="123",
-    chave_pri=f"PRI-{NODE_ID}",
-    chave_pub=f"PUB-{NODE_ID}",
-    qtd_moedas=0,
-    matricula=str(NODE_ID),
-    semestre=1,
-)
-
-# Objeto Eleicao lógico (não é a mesma eleição do anel de mural,
-# mas pode ser usado futuramente se você quiser unificar)
-eleicao_logica = EleicaoLogica(ip_inicial=f"http://127.0.0.1:{PORT}")
-
-# Nó blockchain associado a este processo
 no_blockchain = No(
-    ip="127.0.0.1",
+    ip=IP_LOCAL,
     porta=PORT,
     usuario=usuario_local,
     eleicao=eleicao_logica,
     moeda_config=moeda_config,
 )
 
-# Adiciona o próximo nó do anel como peer do nó blockchain (para /tx etc.)
-try:
-    parsed_next = urlparse(noh_conectado)
-    host_next = parsed_next.hostname or "127.0.0.1"
-    port_next = parsed_next.port or 8000
-    no_blockchain.adicionar_peer(host_next, port_next)
-except Exception:
-    logging.warning("Não foi possível registrar noh_conectado como peer do No blockchain")
-
-# =====================================================
-#  EVENTOS ACADÊMICOS → GERAÇÃO DE TRANSACÕES EDUCOIN
-# =====================================================
-
-# "Carteira institucional" (de onde as recompensas saem e para onde
-# os pagamentos de marketplace entram). Em um projeto maior,
-# isso poderia ser uma Pessoa/Diretor com chaves próprias.
-CHAVE_PUB_INSTITUCIONAL = "PUB-INSTITUICAO"
-CHAVE_PRI_INSTITUCIONAL = "PRI-INSTITUICAO"  # aqui é simbólica
-
-def calcular_recompensa_monitoria(duracao_horas, feedback_nota=None):
-    """
-    Calcula a quantidade de EduCoin por uma monitoria.
-    Regra simples: 10 moedas por hora, com pequeno ajuste por feedback (0–10).
-    """
-    dur = max(duracao_horas, 0)
-    base = dur * 10.0
-    if feedback_nota is not None:
-        try:
-            fb = float(feedback_nota)
-            # Ajuste suave: nota 10 -> +20%, nota 0 -> -20%
-            fator = 1.0 + (fb - 5.0) / 25.0
-            if fator < 0.5:
-                fator = 0.5
-            if fator > 1.5:
-                fator = 1.5
-            base *= fator
-        except Exception:
-            pass
-    return round(base, 2)
+# --------------------------------------------------------------------
+# Utilidades: usuários / chave privada
+# --------------------------------------------------------------------
 
 
-def registrar_monitoria(aluno_monitor, aluno_atendido, duracao_horas, descricao=""):
-    """
-    Gera uma transação de recompensa de monitoria para o aluno_monitor.
-    - Emite EduCoin (respeitando o max_supply).
-    - Cria Transacao da carteira institucional -> carteira do monitor.
-    - Envia a transação para a rede via no_blockchain.
-    Retorna o objeto Transacao.
-    """
-    valor = calcular_recompensa_monitoria(duracao_horas)
-
-    # Garante que ainda há supply disponível
-    if not moeda_config.pode_emitir(valor):
-        raise ValueError("Supply de EduCoin esgotado para recompensas de monitoria.")
-
-    moeda_config.registrar_emissao(valor)
-
-    # Atualiza relógio vetorial e cria transação
-    vc_increment()
-    tx = Transacao(
-        de_chave_pub=CHAVE_PUB_INSTITUCIONAL,
-        para_chave_pub=aluno_monitor.chave_pub,
-        valor=valor,
-        vc=vc_get_copy(),
-    )
-
-    # (Descrição/aluno_atendido podem ser guardados em outra estrutura, se quiser.)
-    no_blockchain.enviar_transacao(tx)
-    return tx
-
-
-def calcular_recompensa_nota(nota):
-    """
-    Converte uma nota (0–10) em recompensa em EduCoin.
-    Exemplo: nota 6 -> 0 moedas; nota 10 -> 40 moedas (linear).
-    """
+def carregar_usuarios() -> List[Dict]:
+    if not os.path.exists(USERS_FILE):
+        return []
     try:
-        n = float(nota)
+        with open(USERS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
     except Exception:
-        return 0.0
-    if n < 6.0:
-        return 0.0
-    if n > 10.0:
-        n = 10.0
-    # Mapeia [6,10] -> [0,40]
-    recompensa = (n - 6.0) * 10.0
-    return round(recompensa, 2)
+        return []
 
 
-def registrar_nota(aluno, disciplina, nota):
+def validar_chave_privada(chave_pub: str, frase_privada: str) -> bool:
     """
-    Se a nota for suficiente, gera uma transação de recompensa para o aluno
-    baseada em calcular_recompensa_nota.
-    Retorna a Transacao ou None se não houver recompensa.
+    Verifica se a frase_privada corresponde à chave privada
+    armazenada para o dono da chave pública.
     """
-    valor = calcular_recompensa_nota(nota)
-    if valor <= 0:
-        return None
+    usuarios = carregar_usuarios()
+    frase_norm = "PRI-" + " ".join(frase_privada.strip().split())
+    for u in usuarios:
+        if u.get("chave_pub") == chave_pub:
+            return u.get("chave_pri") == frase_norm
+    return False
 
-    if not moeda_config.pode_emitir(valor):
-        raise ValueError("Supply de EduCoin esgotado para recompensas de notas.")
-
-    moeda_config.registrar_emissao(valor)
-
-    vc_increment()
-    tx = Transacao(
-        de_chave_pub=CHAVE_PUB_INSTITUCIONAL,
-        para_chave_pub=aluno.chave_pub,
-        valor=valor,
-        vc=vc_get_copy(),
-    )
-
-    no_blockchain.enviar_transacao(tx)
-    return tx
+# --------------------------------------------------------------------
+# Relógio vetorial
+# --------------------------------------------------------------------
 
 
-def calcular_recompensa_evento(tipo_evento):
-    """
-    Retorna a recompensa padrão para diferentes tipos de evento.
-    Você pode ajustar o dicionário conforme o projeto.
-    """
-    tabela = {
-        "palestra": 20.0,
-        "workshop": 30.0,
-        "maratona_programacao": 50.0,
-        "projeto_extensao": 40.0,
-        "outro": 10.0,
-    }
-    return tabela.get(tipo_evento, tabela["outro"])
+def vc_increment():
+    chave = str(NODE_ID)
+    vc[chave] = vc.get(chave, 0) + 1
 
 
-def registrar_participacao_evento(aluno, tipo_evento, descricao=""):
-    """
-    Gera recompensa para participação em evento acadêmico.
-    """
-    valor = calcular_recompensa_evento(tipo_evento)
-
-    if not moeda_config.pode_emitir(valor):
-        raise ValueError("Supply de EduCoin esgotado para recompensas de eventos.")
-
-    moeda_config.registrar_emissao(valor)
-
-    vc_increment()
-    tx = Transacao(
-        de_chave_pub=CHAVE_PUB_INSTITUCIONAL,
-        para_chave_pub=aluno.chave_pub,
-        valor=valor,
-        vc=vc_get_copy(),
-    )
-
-    no_blockchain.enviar_transacao(tx)
-    return tx
+def vc_merge(incoming: Dict[str, int]):
+    for k, v in incoming.items():
+        vc[k] = max(vc.get(k, 0), v)
 
 
-def registrar_material_compartilhado(aluno, link, tipo_material="apostila"):
-    """
-    Recompensa por compartilhar material (apostila, vídeo, lista de exercícios...).
-    Exemplo simples: 15 moedas fixas por material.
-    """
-    valor = 15.0
+def vc_get_copy() -> Dict[str, int]:
+    return dict(vc)
 
-    if not moeda_config.pode_emitir(valor):
-        raise ValueError("Supply de EduCoin esgotado para recompensas de material.")
-
-    moeda_config.registrar_emissao(valor)
-
-    vc_increment()
-    tx = Transacao(
-        de_chave_pub=CHAVE_PUB_INSTITUCIONAL,
-        para_chave_pub=aluno.chave_pub,
-        valor=valor,
-        vc=vc_get_copy(),
-    )
-
-    no_blockchain.enviar_transacao(tx)
-    return tx
+# --------------------------------------------------------------------
+# Handler HTTP
+# --------------------------------------------------------------------
 
 
-def registrar_projeto(aluno, titulo, tipo_projeto="pesquisa"):
-    """
-    Recompensa por participação em projeto (pesquisa, extensão, TCC, etc.).
-    Aqui usamos uma recompensa padrão de 50 moedas.
-    """
-    valor = 50.0
-
-    if not moeda_config.pode_emitir(valor):
-        raise ValueError("Supply de EduCoin esgotado para recompensas de projetos.")
-
-    moeda_config.registrar_emissao(valor)
-
-    vc_increment()
-    tx = Transacao(
-        de_chave_pub=CHAVE_PUB_INSTITUCIONAL,
-        para_chave_pub=aluno.chave_pub,
-        valor=valor,
-        vc=vc_get_copy(),
-    )
-
-    no_blockchain.enviar_transacao(tx)
-    return tx
-
-
-# =====================================================
-#             MARKETPLACE DE BENEFÍCIOS
-# =====================================================
-
-# Tabela simples de benefícios disponíveis
-BENEFICIOS = {
-    "lab_extra": {
-        "nome": "Horas extras de laboratório",
-        "custo": 50.0,
-    },
-    "mentoria": {
-        "nome": "Sessão de mentoria individual",
-        "custo": 80.0,
-    },
-    "prioridade_tema": {
-        "nome": "Prioridade na escolha de tema de projeto",
-        "custo": 40.0,
-    },
-}
-
-# Histórico de resgates (em memória)
-RESGATES = []
-
-
-def listar_beneficios():
-    """
-    Retorna a lista de benefícios disponíveis no marketplace.
-    """
-    return [
-        {"id": bid, "nome": info["nome"], "custo": info["custo"]}
-        for bid, info in BENEFICIOS.items()
-    ]
-
-
-def resgatar_beneficio(chave_pub, beneficio_id):
-    """
-    Cria uma transação do aluno -> instituição para "pagar" um benefício.
-    - Verifica se o benefício existe.
-    - Verifica se há saldo suficiente (na blockchain).
-    - Gera Transacao da carteira do aluno para a institucional.
-    - Registra o resgate em RESGATES.
-    Retorna um dicionário com os dados do resgate.
-    """
-    if beneficio_id not in BENEFICIOS:
-        raise ValueError("Benefício inexistente.")
-
-    beneficio = BENEFICIOS[beneficio_id]
-    custo = beneficio["custo"]
-
-    # Verifica saldo do aluno
-    saldo = no_blockchain.calcular_saldo(chave_pub)
-    if saldo < custo:
-        raise ValueError(
-            f"Saldo insuficiente. Saldo atual: {saldo}, custo do benefício: {custo}."
-        )
-
-    # Cria transação aluno -> instituição
-    vc_increment()
-    tx = Transacao(
-        de_chave_pub=chave_pub,
-        para_chave_pub=CHAVE_PUB_INSTITUCIONAL,
-        valor=custo,
-        vc=vc_get_copy(),
-    )
-    no_blockchain.enviar_transacao(tx)
-
-    registro = {
-        "beneficio_id": beneficio_id,
-        "beneficio_nome": beneficio["nome"],
-        "chave_pub": chave_pub,
-        "custo": custo,
-        "tx_id": tx.id_tx,
-        "timestamp": tx.timestamp,
-    }
-    RESGATES.append(registro)
-    return registro
-
-
-def listar_resgates(chave_pub=None):
-    """
-    Lista todos os resgates ou apenas os de uma chave pública específica.
-    """
-    if chave_pub is None:
-        return list(RESGATES)
-    return [r for r in RESGATES if r["chave_pub"] == chave_pub]
-
-
-# =====================================================
-#             REDE: async_post + sync_with_next_once
-# =====================================================
-
-def async_post(url: str, payload: dict, max_retries: int = REQUEST_RETRIES):
-    """
-    Faz POST assíncrono com retries básicos e checagem de status HTTP.
-    Não retorna nada; apenas loga erros.
-    """
-    payload_snapshot = dict(payload) if payload is not None else {}
-
-    # anexa VC atual se não houver 'vc' no payload
-    if "vc" not in payload_snapshot:
-        payload_snapshot["vc"] = vc_get_copy()
-
-    def _run():
-        for attempt in range(1, max_retries + 1):
-            try:
-                resp = session.post(url, json=payload_snapshot, timeout=TIMEOUT_S)
-                if 200 <= resp.status_code < 300:
-                    logging.info(f"POST {url} sucesso (status={resp.status_code})")
-                    return
-                else:
-                    logging.warning(f"POST {url} respondeu {resp.status_code}: {resp.text}")
-            except requests.RequestException as e:
-                logging.warning(f"Falha POST {url} (tentativa {attempt}): {e}")
-        logging.error(f"Desistindo de POST para {url} depois de {max_retries} tentativas")
-
-    threading.Thread(target=_run, daemon=True).start()
-
-
-def sync_with_next_once(destino: Optional[str] = None) -> int:
-    """
-    Busca /mural do nó destino e incorpora mensagens novas no mural local.
-    Retorna o número de mensagens adicionadas.
-    Se destino não for fornecido, usa noh_conectado.
-    Depois de adicionar, replica as mensagens novas para o destino (propagar unificação).
-    """
-    added = 0
-    if destino is None:
-        with lock:
-            destino = noh_conectado
-    if not destino:
-        return 0
-
-    try:
-        logging.info(f"Sincronizando mural com {destino}")
-        resp = session.get(destino + "/mural", timeout=TIMEOUT_S)
-        if resp.status_code != 200:
-            logging.warning(f"GET {destino}/mural devolveu status {resp.status_code}")
-            return 0
-
-        other_mural = resp.json()
-        if not isinstance(other_mural, list):
-            logging.warning("Resposta do /mural não é lista")
-            return 0
-
-        new_msgs = []
-        with lock:
-            existing_ids = {m["id"] for m in mural}
-            for msg in other_mural:
-                mid = str(msg.get("id"))
-                if mid not in existing_ids:
-                    mural.append(
-                        {
-                            "id": mid,
-                            "autor": msg.get("autor"),
-                            "texto": msg.get("texto", ""),
-                            "vc": msg.get("vc"),
-                        }
-                    )
-                    new_msgs.append(
-                        {
-                            "id": mid,
-                            "autor": msg.get("autor"),
-                            "texto": msg.get("texto", ""),
-                            "vc": msg.get("vc"),
-                        }
-                    )
-                    added += 1
-
-        if added:
-            logging.info(f"Sincronização: adicionadas {added} mensagens do {destino}")
-            # replicar mensagens novas para o próximo nó para propagar unificação
-            for msg in new_msgs:
-                async_post(destino + "/mural", msg)
-
-    except requests.RequestException as e:
-        logging.warning(f"Falha ao sincronizar com {destino}: {e}")
-    except ValueError:
-        logging.warning("Resposta JSON inválida ao sincronizar mural")
-
-    return added
-
-
-# ========== SERVIDOR HTTP ==========
-
-class NossoHandler(http.server.BaseHTTPRequestHandler):
-    server_version = "NossoAnel/0.5"
-
-    def _send_json(self, code: int, payload):
-        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+class Handler(BaseHTTPRequestHandler):
+    server_version = "EduCoinRing/0.1"
 
     def log_message(self, format, *args):
-        # Redireciona logs do BaseHTTPRequestHandler para logging
-        logging.info("%s - - %s" % (self.client_address[0], format % args))
+        logging.info("HTTP: " + format % args)
 
-    # ------------- GET -------------
+    def _send_json(self, code: int, payload):
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    # ----------------- GET -----------------
+
     def do_GET(self):
-        global participante, mural, lider
+        global mural, lider
 
         parsed = urlparse(self.path)
         path = parsed.path
-        qs = parse_qs(parsed.query)
+        params = parse_qs(parsed.query)
 
-        # --------- API BLOCKCHAIN: SALDO ----------
-        if path == "/saldo":
-            chave = qs.get("chave_pub", [None])[0]
-            if not chave:
-                self._send_json(400, {"erro": "Parâmetro 'chave_pub' obrigatório"})
-                return
-            saldo = no_blockchain.calcular_saldo(chave)
-            self._send_json(200, {"chave_pub": chave, "saldo": saldo})
+        if path == "/info":
+            self._send_json(200, {
+                "node_id": NODE_ID,
+                "port": PORT,
+                "noh_conectado": noh_conectado,
+                "leader": lider,
+                "vc": vc_get_copy(),
+            })
             return
 
-        # --------- API BLOCKCHAIN: CADEIA ----------
+        if path == "/leader":
+            self._send_json(200, {"leader": lider})
+            return
+
+        if path == "/mural":
+            self._send_json(200, mural)
+            return
+
+        if path == "/saldo":
+            chave_pub = params.get("chave_pub", [""])[0]
+            if not chave_pub:
+                self._send_json(400, {"erro": "chave_pub obrigatória"})
+                return
+            saldo = no_blockchain.calcular_saldo(chave_pub)
+            self._send_json(200, {"chave_pub": chave_pub, "saldo": saldo})
+            return
+
         if path == "/blockchain":
             chain = [b.to_dict() for b in no_blockchain.blockchain]
             self._send_json(200, chain)
             return
 
-        # --------- FUNCIONALIDADES DO ANEL ----------
-        if path.startswith("/iniciaeleicao"):
-            with lock:
-                participante = True
-                destino = noh_conectado
-            vc_increment()
-            async_post(destino + "/eleicao", {"candidato": NODE_ID})
-            self._send_json(202, {"mensagem": "Eleição iniciada", "meu_id": NODE_ID})
+        if path == "/historico":
+            chave_pub = params.get("chave_pub", [""])[0]
+            if not chave_pub:
+                self._send_json(400, {"erro": "chave_pub obrigatória"})
+                return
+            historico = no_blockchain.obter_historico(chave_pub)
+            self._send_json(200, [tx.to_dict() for tx in historico])
+            return
 
-        elif path.startswith("/leader"):
-            with lock:
-                atual = lider
-            self._send_json(200, {"leader": atual})
+        if path == "/iniciaeleicao":
+            self._start_election()
+            self._send_json(200, {"status": "ok", "msg": "eleição iniciada"})
+            return
 
-        elif path.startswith("/mural"):
-            with lock:
-                mural_copy = list(mural)
-            self._send_json(200, mural_copy)
+        self.send_response(404)
+        self.end_headers()
 
-        else:
-            self.send_response(404)
-            self.end_headers()
+    # ----------------- POST -----------------
 
-    # ------------- POST -------------
     def do_POST(self):
-        global participante, lider, mural
+        global mural, participante, lider
 
         length = int(self.headers.get("Content-Length", 0))
-        content_type = self.headers.get("Content-Type", "")
         body = self.rfile.read(length).decode("utf-8") if length else ""
+        content_type = self.headers.get("Content-Type", "")
 
         if length and "application/json" not in content_type:
             self.send_response(415)
@@ -589,188 +219,214 @@ class NossoHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             return
 
-        # se veio vc no payload, mescla (recebimento)
-        try:
-            incoming_vc = data.get("vc")
-            if incoming_vc:
-                vc_merge(incoming_vc)
-        except Exception as e:
-            logging.warning(f"Erro ao mesclar VC recebido: {e}")
+        incoming_vc = data.get("vc")
+        if isinstance(incoming_vc, dict):
+            vc_merge(incoming_vc)
 
-        parsed = urlparse(self.path)
-        path = parsed.path
+        path = urlparse(self.path).path
 
-        # -------- API BLOCKCHAIN: /tx (receber transação EduCoin) --------
+        # ---------- mural ----------
+        if path == "/mural":
+            texto = data.get("texto", "").strip()
+            autor = data.get("autor", f"NO-{NODE_ID}")
+            if not texto:
+                self._send_json(400, {"erro": "texto vazio"})
+                return
+            vc_increment()
+            msg = {
+                "id": str(uuid.uuid4()),
+                "texto": texto,
+                "autor": autor,
+                "vc": vc_get_copy(),
+                "timestamp": time.time(),
+            }
+            mural.append(msg)
+            self._send_json(200, msg)
+            return
+
+        if path == "/sync_request":
+            # aqui poderia entrar lógica de sincronização real do mural
+            self._send_json(200, {"status": "ok", "adicionados": 0})
+            return
+
+        # ---------- eleição em anel ----------
+        if path == "/eleicao":
+            self._processar_msg_eleicao(data)
+            self._send_json(200, {"status": "ok"})
+            return
+
+        if path == "/eleito":
+            novo_lider = data.get("lider")
+            lider = novo_lider
+            participante = False
+            self._send_json(200, {"status": "ok", "leader": lider})
+            return
+
+        # ---------- tx genérica recebida da rede ----------
         if path == "/tx":
             try:
-                # Usa a lógica do No (validação + pendente) a partir do dicionário
                 no_blockchain.receber_transacao(data)
+                self._send_json(200, {"status": "ok"})
             except Exception as e:
-                self._send_json(400, {"erro": f"Transação inválida: {e}"})
-                return
-            self._send_json(201, {"status": "ok"})
+                logging.exception("Erro ao receber /tx")
+                self._send_json(400, {"erro": str(e)})
             return
 
-        # -------- /eleicao --------
-        if path.startswith("/eleicao"):
-            raw_cid = data.get("candidato")
-            try:
-                cid = int(raw_cid)
-            except (TypeError, ValueError):
-                self._send_json(400, {"erro": "campo 'candidato' inválido"})
+        # ---------- transferir moedas ----------
+        if path == "/transferir":
+            self._handle_transferir(data)
+            return
+
+        # ---------- minerar manualmente ----------
+        if path == "/minerar":
+            if not no_blockchain.transacoes_pendentes:
+                self._send_json(400, {"erro": "não há transações pendentes"})
+                return
+            bloco = no_blockchain.criar_bloco()
+            ok = no_blockchain.adicionar_bloco(bloco)
+            if not ok:
+                self._send_json(400, {"erro": "falha ao adicionar bloco"})
+                return
+            self._send_json(200, {"status": "ok", "indice": bloco.indice})
+            return
+
+        self.send_response(404)
+        self.end_headers()
+
+    # ----------------- eleição: helpers -----------------
+
+    def _start_election(self):
+        global participante
+        if participante:
+            return
+        participante = True
+        vc_increment()
+        msg = {
+            "tipo": "ELEICAO",
+            "origem": NODE_ID,
+            "candidatos": [NODE_ID],
+            "vc": vc_get_copy(),
+        }
+        self._send_to_next("/eleicao", msg)
+
+    def _processar_msg_eleicao(self, msg: Dict):
+        global participante, lider
+
+        origem = msg.get("origem")
+        candidatos: List[int] = msg.get("candidatos", [])
+
+        if NODE_ID not in candidatos:
+            candidatos.append(NODE_ID)
+
+        if origem == NODE_ID:
+            novo_lider = max(candidatos)
+            lider = novo_lider
+            participante = False
+            aviso = {
+                "tipo": "ELEITO",
+                "lider": novo_lider,
+                "vc": vc_get_copy(),
+            }
+            self._send_to_next("/eleito", aviso)
+        else:
+            encaminhar = {
+                "tipo": "ELEICAO",
+                "origem": origem,
+                "candidatos": candidatos,
+                "vc": vc_get_copy(),
+            }
+            self._send_to_next("/eleicao", encaminhar)
+
+    def _send_to_next(self, path: str, payload: Dict):
+        if not noh_conectado:
+            logging.warning("noh_conectado vazio; mensagem não enviada")
+            return
+        url = f"{noh_conectado}{path}"
+        try:
+            requests.post(url, json=payload, timeout=3)
+        except requests.RequestException as e:
+            logging.warning(f"Falha ao enviar para próximo nó {url}: {e}")
+
+    # ----------------- transferência de moedas -----------------
+
+    def _handle_transferir(self, data: Dict):
+        try:
+            de = data["de_chave_pub"]
+            para = data["para_chave_pub"]
+            valor = float(data["valor"])
+        except Exception:
+            self._send_json(400, {"erro": "JSON deve conter de_chave_pub, para_chave_pub, valor"})
+            return
+
+        if valor <= 0:
+            self._send_json(400, {"erro": "valor deve ser positivo"})
+            return
+
+        frase_privada = data.get("frase_privada")
+
+        # Só exige chave privada se não for o BANCO
+        if de != "EDUCOIN-BANCO":
+            if not frase_privada:
+                self._send_json(400, {"erro": "frase_privada obrigatória"})
+                return
+            if not validar_chave_privada(de, frase_privada):
+                self._send_json(403, {"erro": "chave privada incorreta"})
                 return
 
-            # se o candidato sou eu -> sou líder
-            if cid == NODE_ID:
-                with lock:
-                    lider_local = NODE_ID
-                    destino = noh_conectado
-                    participante = False
-                    lider = lider_local
-                vc_increment()
-                async_post(destino + "/eleito", {"eleito": NODE_ID})
-                self._send_json(200, {"mensagem": "Sou líder", "leader": NODE_ID})
-                return
-
-            # encaminha maior ID
-            with lock:
-                participante = True
-                forward_id = NODE_ID if NODE_ID > cid else cid
-                destino = noh_conectado
+        try:
+            # Controle de emissão pelo BANCO
+            if de == "EDUCOIN-BANCO" and moeda_config is not None:
+                if not moeda_config.pode_emitir(valor):
+                    self._send_json(400, {"erro": "max_supply excedido"})
+                    return
+                moeda_config.registrar_emissao(valor)
 
             vc_increment()
-            async_post(destino + "/eleicao", {"candidato": forward_id})
-            self._send_json(202, {"mensagem": "Eleição encaminhada", "candidato": forward_id})
-            return
+            tx = Transacao(
+                de_chave_pub=de,
+                para_chave_pub=para,
+                valor=valor,
+                vc=vc_get_copy(),
+            )
 
-        # -------- /eleito --------
-        elif path.startswith("/eleito"):
-            raw_eleito = data.get("eleito")
-            try:
-                eleito = int(raw_eleito)
-            except (TypeError, ValueError):
-                self._send_json(400, {"erro": "campo 'eleito' inválido"})
+            # Assinatura didática (se método existir)
+            if de != "EDUCOIN-BANCO" and frase_privada and hasattr(tx, "assinar"):
+                tx.assinar(frase_privada)
+
+            no_blockchain.registrar_transacao_pendente(tx)
+            bloco = no_blockchain.criar_bloco()
+            ok = no_blockchain.adicionar_bloco(bloco)
+            if not ok:
+                self._send_json(400, {"erro": "falha ao adicionar bloco"})
                 return
 
-            with lock:
-                lider_local = eleito
-                lider = eleito
-                participante = False
-                sou_lider = (NODE_ID == eleito)
-                destino = noh_conectado
-
-            if not sou_lider:
-                vc_increment()
-                async_post(destino + "/eleito", {"eleito": eleito})
-
-            self._send_json(200, {"mensagem": "Líder reconhecido", "leader": eleito})
-            return
-
-        # -------- /mural --------
-        elif path.startswith("/mural"):
-            texto = data.get("texto", "")
-            msg_id = data.get("id") or str(uuid.uuid4())
-            autor = data.get("autor", NODE_ID)
-
-            if not isinstance(texto, str) or len(texto) > 5000:
-                self._send_json(400, {"erro": "texto inválido ou muito grande"})
-                return
-
-            msg = {"id": str(msg_id), "autor": autor, "texto": texto, "vc": data.get("vc")}
-
-            with lock:
-                if any(m["id"] == msg["id"] for m in mural):
-                    logging.info("Mensagem já existe no mural: %s", msg["id"])
-                    self._send_json(200, msg)
-                    try:
-                        destino = noh_conectado
-                        vc_increment()
-                        async_post(destino + "/sync_request", {"origin": NODE_ID})
-                    except Exception:
-                        pass
-                    return
-                mural.append(msg)
-
-            with lock:
-                is_lider = (lider == NODE_ID)
-                destino = noh_conectado
-
-            if is_lider:
-                vc_increment()
-                async_post(destino + "/mural", msg)
-            else:
-                try:
-                    vc_increment()
-                    async_post(destino + "/sync_request", {"origin": NODE_ID})
-                except Exception:
-                    pass
-
-            self._send_json(201, msg)
-            return
-
-        # -------- /sync_request --------
-        elif path.startswith("/sync_request"):
-            with lock:
-                is_lider = (lider == NODE_ID)
-                destino = noh_conectado
-
-            if is_lider:
-                added = sync_with_next_once(destino)
-                self._send_json(200, {"mensagens_adicionadas": added})
-            else:
-                try:
-                    vc_increment()
-                    async_post(destino + "/sync_request", {"forwarded_by": NODE_ID})
-                    self._send_json(202, {"mensagem": "Encaminhado ao próximo nó"})
-                except Exception:
-                    self._send_json(500, {"erro": "Falha ao encaminhar sync_request"})
-            return
-
-        else:
-            self.send_response(404)
-            self.end_headers()
-
-
-class ThreadingTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
-    daemon_threads = True
-    allow_reuse_address = True
-
-
-# ========== LOOP DE SINCRONIZAÇÃO DO LÍDER ==========
-
-def sync_with_next_loop():
-    """
-    Loop em background: se este nó for líder, periodicamente chama
-    sync_with_next_once(destino) para unificar o mural com o próximo nó.
-    """
-    while True:
-        try:
-            with lock:
-                is_lider = (lider == NODE_ID)
-                destino = noh_conectado
-            if is_lider and destino:
-                sync_with_next_once(destino)
+            self._send_json(200, {
+                "status": "ok",
+                "tx_id": tx.id_tx,
+                "bloco_indice": bloco.indice,
+            })
         except Exception as e:
-            logging.error(f"Erro no loop de sincronização: {e}")
-        time.sleep(SYNC_INTERVAL_S)
+            logging.exception("Erro em /transferir")
+            self._send_json(400, {"erro": str(e)})
 
+# --------------------------------------------------------------------
+# Servidor
+# --------------------------------------------------------------------
 
-# ========== MAIN / EXECUÇÃO ==========
 
 def run_server(host: str = "", port: int = PORT):
-    httpd = ThreadingTCPServer((host, port), NossoHandler)
-    logging.info(f"Node {NODE_ID} servindo em {host or '0.0.0.0'}:{port}")
-
-    # thread do loop de sincronização do líder
-    sync_thread = threading.Thread(target=sync_with_next_loop, daemon=True)
-    sync_thread.start()
-
-    try:
-        httpd.serve_forever()
-    except KeyboardInterrupt:
-        logging.info("Encerrando servidor...")
-        httpd.shutdown()
-        httpd.server_close()
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+    )
+    with ThreadingTCPServer((host, port), Handler) as httpd:
+        logging.info(f"Servidor iniciado em {host or '0.0.0.0'}:{port} (NODE_ID={NODE_ID})")
+        try:
+            httpd.serve_forever()
+        except KeyboardInterrupt:
+            logging.info("Encerrando servidor...")
+            httpd.shutdown()
+            httpd.server_close()
 
 
 if __name__ == "__main__":
