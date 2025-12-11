@@ -10,7 +10,6 @@ Funcionalidades:
 - Histórico de transações e visualização da blockchain
 - Eleição em anel e mural distribuído
 """
-import threading
 import json
 import os
 import uuid
@@ -20,10 +19,13 @@ from typing import List, Optional
 import requests
 import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext, simpledialog
+import threading
 
 import Funcões as ring  # backend HTTP
 
-USERS_FILE = "usuarios.json"
+# caminho absoluto para o arquivo de usuários, na mesma pasta do Tela.py
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+USERS_FILE = os.path.join(BASE_DIR, "usuarios.json")
 API_BASE = f"http://127.0.0.1:{ring.PORT}"
 
 
