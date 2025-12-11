@@ -8,7 +8,7 @@ Funcionalidades:
 - Crédito inicial: 10 / 100 / 1000 EDU (conforme tipo)
 - Consulta de saldo, transferência (com confirmação via chave privada)
 - Histórico de transações e visualização da blockchain
-- Eleição em anel e mural distribuído
+- Mural distribuído (JSON do líder + participantes), atualizado a cada 10s
 """
 import json
 import os
@@ -153,34 +153,15 @@ class NodeGUI:
 
         frame_user.columnconfigure(0, weight=1)
 
-        # ----------------- botões: eleição + mural -----------------
+        # ----------------- mural (auto) -----------------
 
         frame_btns = ttk.Frame(master, padding=5)
         frame_btns.pack(fill=tk.X)
 
-        ttk.Button(
+        ttk.Label(
             frame_btns,
-            text="Iniciar eleição",
-            command=self.iniciar_eleicao
-        ).grid(row=0, column=0, padx=5, pady=2)
-
-        ttk.Button(
-            frame_btns,
-            text="Ver leader",
-            command=self.ver_leader
-        ).grid(row=0, column=1, padx=5, pady=2)
-
-        ttk.Button(
-            frame_btns,
-            text="Ver mural",
-            command=self.ver_mural
-        ).grid(row=0, column=2, padx=5, pady=2)
-
-        ttk.Button(
-            frame_btns,
-            text="Postar no mural",
-            command=self.postar_mural_dialog
-        ).grid(row=0, column=3, padx=5, pady=2)
+            text="Mural da rede (líder + participantes) é atualizado automaticamente a cada 10 segundos."
+        ).grid(row=0, column=0, sticky="w")
 
         # ----------------- abas principais -----------------
 
@@ -211,6 +192,9 @@ class NodeGUI:
 
         # abre login/cadastro ao iniciar
         self.master.after(300, self.abrir_login_dialog)
+
+        # inicia atualização periódica do mural
+        self.master.after(1000, self.atualizar_mural_periodicamente)
 
     # ----------------------------------------------------------------
     # construção das abas
@@ -463,8 +447,11 @@ class NodeGUI:
         self.entry_chave_saldo.delete(0, tk.END)
         self.entry_chave_saldo.insert(0, user.chave_pub)
 
+        # registra usuário no líder (via backend local)
+        self._registrar_no_lider(user)
+
     # ----------------------------------------------------------------
-    # anel / mural
+    # anel / mural / registro no líder
     # ----------------------------------------------------------------
 
     def atualizar_noh_conectado(self):
@@ -475,62 +462,69 @@ class NodeGUI:
         ring.noh_conectado = novo
         self._log(f"Próximo nó atualizado para: {novo}")
 
-    def iniciar_eleicao(self):
+    def _registrar_no_lider(self, user: Usuario):
+        """
+        Envia as infos públicas do usuário para o líder via backend local.
+        """
         try:
-            resp = requests.get(f"{API_BASE}/iniciaeleicao", timeout=3)
-            self._log(f"/iniciaeleicao: {resp.status_code} {resp.text}")
+            payload = {
+                "id_usuario": user.id_usuario,
+                "nome": user.nome,
+                "chave_pub": user.chave_pub,
+                "ip_no": ring.IP_LOCAL,
+                "porta_no": ring.PORT,
+            }
+            resp = requests.post(
+                f"{API_BASE}/registrar_usuario_publico",
+                json=payload,
+                timeout=5,
+            )
+            if resp.status_code != 200:
+                self._log(f"[MURAL] Falha ao registrar usuário no líder: {resp.text}")
+            else:
+                self._log(f"[MURAL] Usuário registrado no líder: {user.nome}")
         except Exception as e:
-            messagebox.showerror("Erro", f"Falha ao iniciar eleição: {e}")
+            self._log(f"[MURAL] Erro ao registrar usuário no líder: {e}")
 
-    def ver_leader(self):
-        try:
-            resp = requests.get(f"{API_BASE}/leader", timeout=3)
-            data = resp.json()
-            self._log(f"Líder atual: {data.get('leader')}")
-        except Exception as e:
-            messagebox.showerror("Erro", f"Falha ao consultar leader: {e}")
-
-    def ver_mural(self):
+    def atualizar_mural_periodicamente(self):
+        """
+        Consulta /mural no backend e mostra um resumo no log a cada 10s.
+        """
         try:
             resp = requests.get(f"{API_BASE}/mural", timeout=3)
-            msgs = resp.json()
-            self._log("===== MURAL =====")
-            if not msgs:
-                self._log("(vazio)")
-                return
-            for msg in msgs:
-                linha = f"[{msg.get('id')}] {msg.get('autor')}: {msg.get('texto')}"
-                self._log(linha)
+            data = resp.json()
+            self._mostrar_mural(data)
         except Exception as e:
-            messagebox.showerror("Erro", f"Falha ao carregar mural: {e}")
+            self._log(f"[MURAL] Erro ao atualizar mural: {e}")
+        finally:
+            # agenda próxima atualização em 10 segundos
+            self.master.after(10_000, self.atualizar_mural_periodicamente)
 
-    def postar_mural_dialog(self):
-        win = tk.Toplevel(self.master)
-        win.title("Postar no mural")
+    def _mostrar_mural(self, data):
+        """
+        Exibe no log um resumo do JSON do líder:
+        - líder atual
+        - lista de participantes (ip, porta, nome, chave_pub)
+        """
+        if not isinstance(data, dict):
+            self._log("[MURAL] Formato inesperado de dados.")
+            return
 
-        ttk.Label(win, text="Texto da mensagem:").pack(anchor="w", padx=5, pady=(5, 0))
-        txt = tk.Text(win, height=4, width=50)
-        txt.pack(padx=5, pady=5)
+        leader_id = data.get("leader_node_id")
+        participantes = data.get("participants", [])
 
-        def enviar():
-            conteudo = txt.get("1.0", tk.END).strip()
-            if not conteudo:
-                messagebox.showwarning("Atenção", "Mensagem vazia.")
-                return
-            autor = self.usuario_logado.nome if self.usuario_logado else f"NO-{ring.NODE_ID}"
-            try:
-                resp = requests.post(
-                    f"{API_BASE}/mural",
-                    json={"texto": conteudo, "autor": autor},
-                    timeout=3,
-                )
-                data = resp.json()
-                self._log(f"Mensagem postada: {data}")
-                win.destroy()
-            except Exception as e:
-                messagebox.showerror("Erro", f"Falha ao postar no mural: {e}")
+        self._log("===== MURAL (Líder e participantes da rede) =====")
+        self._log(f"Líder: {leader_id}")
+        if not participantes:
+            self._log("Nenhum participante registrado ainda.")
+            return
 
-        ttk.Button(win, text="Enviar", command=enviar).pack(pady=(0, 5))
+        for p in participantes:
+            ip_no = p.get("ip_no")
+            porta_no = p.get("porta_no")
+            nome = p.get("nome")
+            chave_pub = p.get("chave_pub")
+            self._log(f"- {nome} @ {ip_no}:{porta_no} | chave_pub={chave_pub}")
 
     # ----------------------------------------------------------------
     # EduCoin / Blockchain
@@ -601,6 +595,7 @@ class NodeGUI:
                     "para_chave_pub": destino,
                     "valor": valor,
                     "frase_privada": frase,
+                    "id_usuario": self.usuario_logado.id_usuario,
                 },
                 timeout=5,
             )

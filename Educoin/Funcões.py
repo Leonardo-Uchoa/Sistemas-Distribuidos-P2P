@@ -3,17 +3,16 @@ Funcões.py
 Servidor HTTP de um nó da rede EDUCOIN em anel.
 
 Responsável por:
-- Eleição em anel (/iniciaeleicao, /eleicao, /eleito, /leader)
-- Mural distribuído (/mural)
+- Eleição em anel (/eleicao, /eleito, /leader)
+- Mural distribuído (/mural) com JSON do líder e participantes
 - Blockchain EDUCOIN (/saldo, /blockchain, /historico, /tx, /transferir, /minerar)
-- Validação de transferência com chave privada
+- Validação de transferência com chave privada do usuário LOGADO
 """
 
 import json
 import logging
 import os
 import random
-import threading
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler
@@ -26,46 +25,71 @@ import requests
 from Classes import No, Transacao, MoedaConfig, Eleicao
 
 # --------------------------------------------------------------------
+# Caminho base / arquivo de usuários
+# --------------------------------------------------------------------
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+USERS_FILE = os.path.join(BASE_DIR, "usuarios.json")
+
+# --------------------------------------------------------------------
 # Configuração global do nó
 # --------------------------------------------------------------------
 
-NODE_ID: int = random.randint(1000, 9999)
-PORT: int = 8001          # pode mudar para rodar vários nós
 IP_LOCAL: str = "127.0.0.1"
+PORT: int = 8001  # pode ser alterado para rodar vários nós
+
+# agora o NODE_ID codifica ip:porta (facilita descobrir o líder)
+NODE_ID: str = f"{IP_LOCAL}:{PORT}"
 
 # Próximo nó no anel (editável pela interface)
 noh_conectado: str = f"http://{IP_LOCAL}:{PORT}"
 
-# Arquivo de usuários (compartilhado com a GUI)
-USERS_FILE = "usuarios.json"
-
-# Relógio vetorial + mural
+# Relógio vetorial
 vc: Dict[str, int] = {}
-mural: List[Dict] = []
 
-participante: bool = False       # se já está participando da eleição
-lider: Optional[int] = None      # NODE_ID do líder atual, se existir
+# Flag de eleição e líder atual (string "ip:porta")
+participante: bool = False
+lider: Optional[str] = NODE_ID  # por padrão, este nó começa como líder
+
+# JSON mantido pelo líder e replicado nos demais nós
+# participants = lista de dicts: {id_usuario, nome, chave_pub, ip_no, porta_no}
+leader_info: Dict = {
+    "leader_node_id": NODE_ID,
+    "participants": []
+}
+
+# chave pública do "banco" institucional
+BANCO_CHAVE_PUB = "EDUCOIN-BANCO"
 
 # --------------------------------------------------------------------
 # Blockchain / Moeda
 # --------------------------------------------------------------------
 
-# Moeda EDUCOIN com supply máximo
-try:
-    moeda_config = MoedaConfig(
-        nome="EDUCOIN",
-        lista_chaves_pub_autorizadas=None,
-        time_limit=None,
-        max_supply=100_000,
-    )
-except TypeError:
-    # fallback se a assinatura for diferente
-    moeda_config = MoedaConfig("EDUCOIN", None, None, 100_000)
+# Tenta instanciar MoedaConfig com diferentes assinaturas,
+# para ser compatível com a versão existente em Classes.py.
+moeda_config = None
+_last_err = None
+for args, kwargs in [
+    ([], {"nome": "EDUCOIN",
+          "lista_chaves_pub_autorizadas": None,
+          "time_limit": None,
+          "max_supply": 100_000}),
+    (["EDUCOIN", None, None, 100_000], {}),
+    (["EDUCOIN", None, None], {}),
+    (["EDUCOIN"], {}),
+]:
+    try:
+        moeda_config = MoedaConfig(*args, **kwargs)
+        break
+    except TypeError as e:
+        _last_err = e
+
+if moeda_config is None:
+    raise RuntimeError(f"Não foi possível instanciar MoedaConfig: {_last_err}")
 
 eleicao_logica = Eleicao(ip_inicial=str(NODE_ID))
 
-# Usuário local não é usado diretamente aqui,
-# a GUI trabalha com os usuários de usuarios.json
+# Usuário local não é usado diretamente aqui; a GUI controla usuários via usuarios.json
 usuario_local = None
 
 no_blockchain = No(
@@ -82,6 +106,13 @@ no_blockchain = No(
 
 
 def carregar_usuarios() -> List[Dict]:
+    """
+    Lê o arquivo usuarios.json (se existir) e devolve uma lista de dicts.
+    Cada dict deve ter, no mínimo:
+    - id_usuario
+    - chave_pub
+    - chave_pri
+    """
     if not os.path.exists(USERS_FILE):
         return []
     try:
@@ -91,17 +122,66 @@ def carregar_usuarios() -> List[Dict]:
         return []
 
 
-def validar_chave_privada(chave_pub: str, frase_privada: str) -> bool:
+def validar_chave_privada(id_usuario: str, frase_privada: str) -> bool:
     """
     Verifica se a frase_privada corresponde à chave privada
-    armazenada para o dono da chave pública.
+    do USUÁRIO LOGADO (identificado por id_usuario).
+
+    Retorna:
+        True  -> frase é exatamente a chave privada salva para esse usuário
+        False -> usuário não existe ou frase não confere
     """
     usuarios = carregar_usuarios()
+
+    # normaliza a frase digitada (tira espaços extras e adiciona prefixo PRI-)
     frase_norm = "PRI-" + " ".join(frase_privada.strip().split())
+
     for u in usuarios:
-        if u.get("chave_pub") == chave_pub:
+        if u.get("id_usuario") == id_usuario:
+            # compara a chave privada salva com a frase normalizada
             return u.get("chave_pri") == frase_norm
+
+    # se não achou o usuário ou não bateu, é inválida
     return False
+
+
+def dar_bonus_inicial(chave_pub_destino: str, valor: float = 10.0) -> Dict[str, Optional[int]]:
+    """
+    Emite moedas a partir da carteira institucional (BANCO_CHAVE_PUB)
+    diretamente para a chave pública informada.
+
+    Usado como bônus de novos usuários (por padrão, 10 EDU).
+    """
+    global moeda_config
+
+    if valor <= 0:
+        raise ValueError("valor do bônus deve ser positivo")
+
+    # Controle de emissão (se MoedaConfig implementar)
+    if moeda_config is not None and hasattr(moeda_config, "pode_emitir") and hasattr(moeda_config, "registrar_emissao"):
+        if not moeda_config.pode_emitir(valor):
+            raise ValueError("max_supply excedido ao tentar dar bônus inicial")
+        moeda_config.registrar_emissao(valor)
+
+    # Cria transação e bloco
+    vc_increment()
+    tx = Transacao(
+        de_chave_pub=BANCO_CHAVE_PUB,
+        para_chave_pub=chave_pub_destino,
+        valor=valor,
+        vc=vc_get_copy(),
+    )
+
+    no_blockchain.registrar_transacao_pendente(tx)
+    bloco = no_blockchain.criar_bloco()
+    ok = no_blockchain.adicionar_bloco(bloco)
+    if not ok:
+        raise RuntimeError("falha ao adicionar bloco de bônus inicial")
+
+    return {
+        "tx_id": getattr(tx, "id_tx", None),
+        "bloco_indice": getattr(bloco, "indice", None),
+    }
 
 # --------------------------------------------------------------------
 # Relógio vetorial
@@ -127,7 +207,7 @@ def vc_get_copy() -> Dict[str, int]:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "EduCoinRing/0.1"
+    server_version = "EduCoinRing/0.3"
 
     def log_message(self, format, *args):
         logging.info("HTTP: " + format % args)
@@ -143,7 +223,7 @@ class Handler(BaseHTTPRequestHandler):
     # ----------------- GET -----------------
 
     def do_GET(self):
-        global mural, lider
+        global leader_info, lider
 
         parsed = urlparse(self.path)
         path = parsed.path
@@ -163,8 +243,9 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(200, {"leader": lider})
             return
 
+        # MURAL: sempre devolve o JSON do líder (líder + participantes)
         if path == "/mural":
-            self._send_json(200, mural)
+            self._send_json(200, leader_info)
             return
 
         if path == "/saldo":
@@ -190,6 +271,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(200, [tx.to_dict() for tx in historico])
             return
 
+        # endpoint continua existindo (mas não é mais chamado pela GUI),
+        # pode ser útil para testes manuais.
         if path == "/iniciaeleicao":
             self._start_election()
             self._send_json(200, {"status": "ok", "msg": "eleição iniciada"})
@@ -201,7 +284,7 @@ class Handler(BaseHTTPRequestHandler):
     # ----------------- POST -----------------
 
     def do_POST(self):
-        global mural, participante, lider
+        global participante, lider, leader_info
 
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length).decode("utf-8") if length else ""
@@ -225,28 +308,9 @@ class Handler(BaseHTTPRequestHandler):
 
         path = urlparse(self.path).path
 
-        # ---------- mural ----------
-        if path == "/mural":
-            texto = data.get("texto", "").strip()
-            autor = data.get("autor", f"NO-{NODE_ID}")
-            if not texto:
-                self._send_json(400, {"erro": "texto vazio"})
-                return
-            vc_increment()
-            msg = {
-                "id": str(uuid.uuid4()),
-                "texto": texto,
-                "autor": autor,
-                "vc": vc_get_copy(),
-                "timestamp": time.time(),
-            }
-            mural.append(msg)
-            self._send_json(200, msg)
-            return
-
-        if path == "/sync_request":
-            # aqui poderia entrar lógica de sincronização real do mural
-            self._send_json(200, {"status": "ok", "adicionados": 0})
+        # ---------- registro de usuário no líder ----------
+        if path == "/registrar_usuario_publico":
+            self._handle_registrar_usuario_publico(data)
             return
 
         # ---------- eleição em anel ----------
@@ -259,6 +323,8 @@ class Handler(BaseHTTPRequestHandler):
             novo_lider = data.get("lider")
             lider = novo_lider
             participante = False
+            # atualiza o id do líder no JSON compartilhado
+            leader_info["leader_node_id"] = novo_lider
             self._send_json(200, {"status": "ok", "leader": lider})
             return
 
@@ -296,6 +362,11 @@ class Handler(BaseHTTPRequestHandler):
     # ----------------- eleição: helpers -----------------
 
     def _start_election(self):
+        """
+        Inicia eleição em anel.
+        Agora não é chamado pela GUI: só é disparado internamente,
+        por exemplo quando não conseguimos falar com o líder.
+        """
         global participante
         if participante:
             return
@@ -310,18 +381,20 @@ class Handler(BaseHTTPRequestHandler):
         self._send_to_next("/eleicao", msg)
 
     def _processar_msg_eleicao(self, msg: Dict):
-        global participante, lider
+        global participante, lider, leader_info
 
         origem = msg.get("origem")
-        candidatos: List[int] = msg.get("candidatos", [])
+        candidatos: List[str] = msg.get("candidatos", [])
 
         if NODE_ID not in candidatos:
             candidatos.append(NODE_ID)
 
         if origem == NODE_ID:
+            # escolhe o "maior" ID como líder (string "ip:porta")
             novo_lider = max(candidatos)
             lider = novo_lider
             participante = False
+            leader_info["leader_node_id"] = novo_lider
             aviso = {
                 "tipo": "ELEITO",
                 "lider": novo_lider,
@@ -347,40 +420,151 @@ class Handler(BaseHTTPRequestHandler):
         except requests.RequestException as e:
             logging.warning(f"Falha ao enviar para próximo nó {url}: {e}")
 
+    # ----------------- registro de usuário no líder -----------------
+
+    def _handle_registrar_usuario_publico(self, data: Dict):
+        """
+        Registra informações públicas de um usuário no LÍDER.
+
+        Se este nó NÃO for o líder:
+        - Encaminha para o líder (HTTP) usando o ID do líder (ip:porta);
+        - Se falhar, dispara eleição e retorna erro 503.
+
+        Se este nó for o líder:
+        - Atualiza/adiciona participante em leader_info["participants"];
+        - Garante que leader_node_id = NODE_ID;
+        - Retorna o JSON completo do líder (leader_info).
+        """
+        global leader_info, lider
+
+        # payload esperado: id_usuario, nome, chave_pub, ip_no, porta_no
+        try:
+            id_usuario = data["id_usuario"]
+            nome = data["nome"]
+            chave_pub = data["chave_pub"]
+            ip_no = data["ip_no"]
+            porta_no = data["porta_no"]
+        except KeyError:
+            self._send_json(
+                400,
+                {"erro": "Campos obrigatórios: id_usuario, nome, chave_pub, ip_no, porta_no"},
+            )
+            return
+
+        # Se este nó NÃO é o líder, encaminha
+        if lider != NODE_ID:
+            leader_url = f"http://{lider}" if lider else None
+            if not leader_url:
+                # sem líder conhecido: inicia eleição e retorna erro
+                self._start_election()
+                self._send_json(503, {"erro": "Líder desconhecido, eleição iniciada."})
+                return
+
+            try:
+                resp = requests.post(
+                    f"{leader_url}/registrar_usuario_publico",
+                    json=data,
+                    timeout=5,
+                )
+                # se der certo, atualiza cópia local de leader_info
+                try:
+                    new_info = resp.json()
+                    if isinstance(new_info, dict):
+                        leader_info = new_info
+                except Exception:
+                    pass
+
+                if resp.ok:
+                    self._send_json(200, leader_info)
+                else:
+                    self._send_json(resp.status_code, resp.json())
+                return
+            except requests.RequestException:
+                # líder aparentemente caiu -> inicia eleição
+                self._start_election()
+                self._send_json(
+                    503,
+                    {"erro": "Falha ao contatar líder; eleição iniciada."},
+                )
+                return
+
+        # Se chegou aqui, este nó é o líder -> grava/atualiza
+        participante = {
+            "id_usuario": id_usuario,
+            "nome": nome,
+            "chave_pub": chave_pub,
+            "ip_no": ip_no,
+            "porta_no": porta_no,
+        }
+
+        # evita duplicados por id_usuario
+        ja = False
+        for p in leader_info["participants"]:
+            if p.get("id_usuario") == id_usuario:
+                p.update(participante)
+                ja = True
+                break
+        if not ja:
+            leader_info["participants"].append(participante)
+
+        # líder garante que o campo leader_node_id está correto
+        leader_info["leader_node_id"] = NODE_ID
+
+        self._send_json(200, leader_info)
+
     # ----------------- transferência de moedas -----------------
 
     def _handle_transferir(self, data: Dict):
+        global moeda_config
+
         try:
-            de = data["de_chave_pub"]
-            para = data["para_chave_pub"]
+            de = data["de_chave_pub"]        # chave pública do REMETENTE (logado ou banco)
+            para = data["para_chave_pub"]    # chave pública do DESTINO
             valor = float(data["valor"])
         except Exception:
-            self._send_json(400, {"erro": "JSON deve conter de_chave_pub, para_chave_pub, valor"})
+            self._send_json(
+                400,
+                {"erro": "JSON deve conter de_chave_pub, para_chave_pub, valor"},
+            )
             return
 
         if valor <= 0:
             self._send_json(400, {"erro": "valor deve ser positivo"})
             return
 
-        frase_privada = data.get("frase_privada")
+        # Caso especial: emissão a partir da carteira do BANCO (bônus, crédito inicial etc.)
+        if de == BANCO_CHAVE_PUB:
+            try:
+                result = dar_bonus_inicial(para, valor)
+                self._send_json(
+                    200,
+                    {
+                        "status": "ok",
+                        "tx_id": result.get("tx_id"),
+                        "bloco_indice": result.get("bloco_indice"),
+                    },
+                )
+            except Exception as e:
+                logging.exception("Erro em /transferir (bônus do BANCO)")
+                self._send_json(400, {"erro": str(e)})
+            return
 
-        # Só exige chave privada se não for o BANCO
-        if de != "EDUCOIN-BANCO":
-            if not frase_privada:
-                self._send_json(400, {"erro": "frase_privada obrigatória"})
-                return
-            if not validar_chave_privada(de, frase_privada):
-                self._send_json(403, {"erro": "chave privada incorreta"})
-                return
+        # Demais casos: transferências normais entre usuários (checa chave privada)
+        frase_privada = data.get("frase_privada")
+        id_usuario = data.get("id_usuario")  # ID do usuário logado (remetente)
+
+        if not id_usuario or not frase_privada:
+            self._send_json(
+                400,
+                {"erro": "id_usuario e frase_privada são obrigatórios"},
+            )
+            return
+
+        if not validar_chave_privada(id_usuario, frase_privada):
+            self._send_json(403, {"erro": "chave privada incorreta"})
+            return
 
         try:
-            # Controle de emissão pelo BANCO
-            if de == "EDUCOIN-BANCO" and moeda_config is not None:
-                if not moeda_config.pode_emitir(valor):
-                    self._send_json(400, {"erro": "max_supply excedido"})
-                    return
-                moeda_config.registrar_emissao(valor)
-
             vc_increment()
             tx = Transacao(
                 de_chave_pub=de,
@@ -390,7 +574,7 @@ class Handler(BaseHTTPRequestHandler):
             )
 
             # Assinatura didática (se método existir)
-            if de != "EDUCOIN-BANCO" and frase_privada and hasattr(tx, "assinar"):
+            if frase_privada and hasattr(tx, "assinar"):
                 tx.assinar(frase_privada)
 
             no_blockchain.registrar_transacao_pendente(tx)
@@ -400,11 +584,14 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(400, {"erro": "falha ao adicionar bloco"})
                 return
 
-            self._send_json(200, {
-                "status": "ok",
-                "tx_id": tx.id_tx,
-                "bloco_indice": bloco.indice,
-            })
+            self._send_json(
+                200,
+                {
+                    "status": "ok",
+                    "tx_id": tx.id_tx,
+                    "bloco_indice": bloco.indice,
+                },
+            )
         except Exception as e:
             logging.exception("Erro em /transferir")
             self._send_json(400, {"erro": str(e)})
@@ -420,7 +607,9 @@ def run_server(host: str = "", port: int = PORT):
         format="%(asctime)s [%(levelname)s] %(message)s",
     )
     with ThreadingTCPServer((host, port), Handler) as httpd:
-        logging.info(f"Servidor iniciado em {host or '0.0.0.0'}:{port} (NODE_ID={NODE_ID})")
+        logging.info(
+            f"Servidor iniciado em {host or '0.0.0.0'}:{port} (NODE_ID={NODE_ID})"
+        )
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:
