@@ -1,0 +1,48 @@
+version: "3.9"
+
+services:
+  educoin-leader:
+    build:
+      context: ./educoin_project
+    image: educoin-node
+    container_name: educoin-leader
+    environment:
+      - NODE_ID=leader
+      - IS_LEADER=true
+      - PEER_NODES=http://educoin-node-1:8000,http://educoin-node-2:8000
+      - LEADER_TOKEN=super-secret-token
+      - EDUCOIN_DATA_PATH=/data/ledger.json
+    volumes:
+      - ./data/leader:/data
+    ports:
+      - "8000:8000"
+
+  educoin-node-1:
+    image: educoin-node
+    depends_on:
+      - educoin-leader
+    environment:
+      - NODE_ID=node-1
+      - IS_LEADER=false
+      - LEADER_URL=http://educoin-leader:8000
+      - LEADER_TOKEN=super-secret-token
+      - EDUCOIN_DATA_PATH=/data/ledger.json
+    volumes:
+      - ./data/node1:/data
+    ports:
+      - "8001:8000"
+
+  educoin-node-2:
+    image: educoin-node
+    depends_on:
+      - educoin-leader
+    environment:
+      - NODE_ID=node-2
+      - IS_LEADER=false
+      - LEADER_URL=http://educoin-leader:8000
+      - LEADER_TOKEN=super-secret-token
+      - EDUCOIN_DATA_PATH=/data/ledger.json
+    volumes:
+      - ./data/node2:/data
+    ports:
+      - "8002:8000"
