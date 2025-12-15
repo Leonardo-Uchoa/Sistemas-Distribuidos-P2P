@@ -1,0 +1,424 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>EduCoin - Dashboard</title>
+  <style>
+    :root{
+      --bg:#0b1220;
+      --panel:#0f1b2f;
+      --panel2:#0c172a;
+      --text:#e7eefc;
+      --muted:#9bb0d1;
+      --line:rgba(255,255,255,.10);
+      --btn:#2b7bff;
+      --btn2:#1a5fd6;
+      --bad:#ff4d4d;
+      --ok:#2dd4bf;
+      --warn:#fbbf24;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    }
+    *{box-sizing:border-box}
+    body{
+      margin:0;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+      background: linear-gradient(180deg, #070d19 0%, var(--bg) 60%, #070d19 100%);
+      color:var(--text);
+    }
+    .wrap{max-width:1200px;margin:20px auto;padding:0 16px;}
+    .top{
+      display:flex;align-items:center;justify-content:space-between;gap:12px;
+      margin-bottom:14px;
+    }
+    h1{font-size:22px;margin:0}
+    .meta{
+      font-family:var(--mono);
+      font-size:12px;color:var(--muted);
+      display:flex;flex-wrap:wrap;gap:10px;
+    }
+    .badge{
+      padding:2px 8px;border-radius:999px;border:1px solid var(--line);
+      background:rgba(255,255,255,.04)
+    }
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+    .card{
+      background: linear-gradient(180deg, var(--panel) 0%, var(--panel2) 100%);
+      border:1px solid var(--line);
+      border-radius:14px;
+      padding:14px;
+      box-shadow: 0 10px 30px rgba(0,0,0,.35);
+    }
+    .card h2{margin:0 0 10px 0;font-size:16px}
+    .row{display:flex;gap:10px;flex-wrap:wrap}
+    label{display:block;font-size:12px;color:var(--muted);margin:8px 0 6px}
+    input, select{
+      width:100%;
+      padding:10px 12px;
+      border-radius:10px;
+      border:1px solid var(--line);
+      background:rgba(0,0,0,.25);
+      color:var(--text);
+      outline:none;
+    }
+    button{
+      padding:10px 12px;
+      border-radius:10px;
+      border:0;
+      background:var(--btn);
+      color:white;
+      cursor:pointer;
+      font-weight:600;
+    }
+    button:hover{background:var(--btn2)}
+    .wide{grid-column:1 / -1}
+    .hint{font-size:12px;color:var(--muted);line-height:1.35}
+    pre{
+      margin:0;
+      padding:12px;
+      border-radius:12px;
+      border:1px dashed rgba(255,255,255,.15);
+      background:rgba(0,0,0,.25);
+      overflow:auto;
+      max-height:360px;
+      font-family:var(--mono);
+      font-size:12px;
+    }
+    table{
+      width:100%;
+      border-collapse:collapse;
+      font-size:12px;
+    }
+    th, td{
+      text-align:left;
+      padding:9px 8px;
+      border-bottom:1px solid rgba(255,255,255,.08);
+      vertical-align:top;
+      font-family: var(--mono);
+    }
+    th{color:var(--muted);font-weight:700}
+    .status-ok{color:var(--ok);font-weight:700}
+    .status-bad{color:var(--bad);font-weight:700}
+    .status-warn{color:var(--warn);font-weight:700}
+    .right{display:flex;gap:10px;align-items:center}
+    .spacer{height:10px}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="top">
+      <div>
+        <h1>EduCoin</h1>
+        <div class="meta" id="meta">
+          <span class="badge">carregando...</span>
+        </div>
+      </div>
+      <div class="right">
+        <button onclick="refreshAll()">Atualizar</button>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <h2>Rede (P2P)</h2>
+        <div class="hint">
+          1) Defina <b>meu_url</b> como o IP/porta acessível pelo seu amigo (ex.: <span style="font-family:var(--mono)">http://192.168.0.10:8000</span>).<br/>
+          2) Depois adicione o <b>peer_url</b> do amigo para conectar e sincronizar.<br/>
+          <b>Importante:</b> não use hostnames de container nem "localhost" quando estiver entre PCs.
+        </div>
+
+        <label>Meu endereço (meu_url anunciado para a rede)</label>
+        <div class="row">
+          <div style="flex:1">
+            <input id="self_url" placeholder="http://SEU_IP:8000" />
+          </div>
+          <div>
+            <button onclick="saveSelfUrl()">Salvar meu_url</button>
+          </div>
+        </div>
+
+        <div class="spacer"></div>
+
+        <label>Conectar a um peer</label>
+        <div class="row">
+          <div style="flex:1">
+            <input id="peer_url" placeholder="http://IP_DO_AMIGO:8000" />
+          </div>
+          <div>
+            <button onclick="connectPeer()">Adicionar e Conectar</button>
+          </div>
+        </div>
+
+        <div class="spacer"></div>
+        <pre id="net_result">{}</pre>
+      </div>
+
+      <div class="card">
+        <h2>Membros e líder</h2>
+        <div class="hint">O líder só muda quando o líder atual fica inacessível. A eleição escolhe o maior ID entre nós ativos.</div>
+        <div class="spacer"></div>
+        <table>
+          <thead>
+            <tr>
+              <th>ID nó</th>
+              <th>URL</th>
+              <th>Papel</th>
+              <th>Último visto</th>
+            </tr>
+          </thead>
+          <tbody id="members_body">
+            <tr><td colspan="4" style="color:var(--muted)">carregando...</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <h2>Cadastro</h2>
+        <label>Tipo</label>
+        <select id="reg_tipo">
+          <option value="aluno">Aluno (100)</option>
+          <option value="professor">Professor (1000)</option>
+          <option value="diretor">Diretor (10000)</option>
+        </select>
+
+        <label>Nome</label>
+        <input id="reg_nome" placeholder="ex.: Maria" />
+
+        <label>Email</label>
+        <input id="reg_email" placeholder="ex.: maria@email.com" />
+
+        <label>Matrícula</label>
+        <input id="reg_matricula" placeholder="ex.: 20251234" />
+
+        <label>Frase-secreta (gera chave)</label>
+        <input id="reg_frase" placeholder="digite algo que você não esqueça" />
+
+        <div class="spacer"></div>
+        <button style="width:100%" onclick="registerUser()">Cadastrar</button>
+
+        <div class="spacer"></div>
+        <pre id="reg_result">{}</pre>
+      </div>
+
+      <div class="card">
+        <h2>Transferência</h2>
+        <label>Chave privada (remetente)</label>
+        <input id="tx_priv" placeholder="cole aqui a priv" />
+
+        <label>Chave pública (destinatário)</label>
+        <input id="tx_dest" placeholder="cole aqui a pub do destinatário" />
+
+        <label>Quantia</label>
+        <input id="tx_amount" type="number" min="1" value="1" />
+
+        <div class="spacer"></div>
+        <button style="width:100%" onclick="transfer()">Transferir</button>
+
+        <div class="spacer"></div>
+        <pre id="tx_result">{}</pre>
+      </div>
+
+      <div class="card wide">
+        <h2>Contas</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Tipo</th>
+              <th>Nome</th>
+              <th>Matrícula</th>
+              <th>Saldo</th>
+              <th>Chave Pub</th>
+            </tr>
+          </thead>
+          <tbody id="users_body">
+            <tr><td colspan="5" style="color:var(--muted)">carregando...</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="card wide">
+        <h2>Transações recentes</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Quando</th>
+              <th>De</th>
+              <th>Para</th>
+              <th>Quantia</th>
+              <th>TxID</th>
+            </tr>
+          </thead>
+          <tbody id="txs_body">
+            <tr><td colspan="5" style="color:var(--muted)">carregando...</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="card wide">
+        <h2>Debug do estado</h2>
+        <pre id="state_debug">{}</pre>
+      </div>
+    </div>
+  </div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+
+  function pretty(obj){
+    try { return JSON.stringify(obj, null, 2); } catch(e){ return String(obj); }
+  }
+
+  function statusBadge(ok, msg){
+    const cls = ok ? "status-ok" : "status-bad";
+    return `<span class="badge ${cls}">${ok ? "OK" : "ERRO"}: ${msg}</span>`;
+  }
+
+  async function apiGet(path){
+    const r = await fetch(path);
+    return await r.json();
+  }
+
+  async function apiPost(path, body){
+    const r = await fetch(path, {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify(body || {})
+    });
+    const j = await r.json().catch(()=>({ok:false,msg:"Resposta não-JSON"}));
+    return { status: r.status, json: j };
+  }
+
+  function short(s, n=12){
+    if(!s) return "";
+    if(s.length <= n) return s;
+    return s.slice(0, n) + "…";
+  }
+
+  function tsToAgo(ts){
+    if(!ts) return "-";
+    const now = Date.now()/1000;
+    const diff = Math.max(0, now - ts);
+    if(diff < 5) return "agora";
+    if(diff < 60) return `${Math.round(diff)}s`;
+    if(diff < 3600) return `${Math.round(diff/60)}min`;
+    return `${Math.round(diff/3600)}h`;
+  }
+
+  async function refreshAll(){
+    const data = await apiGet("/api/state");
+    render(data);
+  }
+
+  function render(data){
+    const node = data.node || {};
+    const cfg = data.config || {};
+    const st = data.state || {};
+    const isLeader = !!data.is_leader;
+
+    const leaderUrl = st.leader_url || "não definido";
+    const selfUrl = cfg.self_url || "não definido";
+
+    $("meta").innerHTML = `
+      <span class="badge">Nó (ID): <b>${node.id_str || node.id || "?"}</b></span>
+      <span class="badge">Líder? <b class="${isLeader ? "status-ok":"status-warn"}">${isLeader ? "SIM" : "NÃO"}</b></span>
+      <span class="badge">leader_url: <span style="font-family:var(--mono)">${leaderUrl}</span></span>
+      <span class="badge">meu_url: <span style="font-family:var(--mono)">${selfUrl}</span></span>
+      <span class="badge">peers: <b>${(cfg.peers||[]).length}</b></span>
+    `;
+
+    if(cfg.self_url) $("self_url").value = cfg.self_url;
+
+    // Members
+    const members = st.members || {};
+    const rows = Object.entries(members)
+      .map(([url, info])=>{
+        const id = info.id ?? "?";
+        const papel = (url === st.leader_url) ? "LÍDER" : (url === cfg.self_url ? "EU" : "peer");
+        const papelCls = (papel==="LÍDER") ? "status-ok" : (papel==="EU" ? "status-warn" : "");
+        return `
+          <tr>
+            <td>${id}</td>
+            <td>${url}</td>
+            <td class="${papelCls}">${papel}</td>
+            <td>${tsToAgo(info.last_seen)}</td>
+          </tr>
+        `;
+      }).join("");
+    $("members_body").innerHTML = rows || `<tr><td colspan="4" style="color:var(--muted)">sem membros</td></tr>`;
+
+    // Users
+    const users = st.usuarios || {};
+    const userRows = Object.values(users).map(u=>`
+      <tr>
+        <td>${u.tipo}</td>
+        <td>${u.nome}</td>
+        <td>${u.matricula}</td>
+        <td>${u.saldo}</td>
+        <td title="${u.chave_pub}">${short(u.chave_pub, 28)}</td>
+      </tr>
+    `).join("");
+    $("users_body").innerHTML = userRows || `<tr><td colspan="5" style="color:var(--muted)">sem contas</td></tr>`;
+
+    // TXs
+    const txs = (st.txs || []).slice(-10).reverse();
+    const txRows = txs.map(t=>`
+      <tr>
+        <td>${(t.timestamp||"").replace("T"," ").slice(0,19)}</td>
+        <td title="${t.de_chave_pub}">${short(t.de_chave_pub, 24)}</td>
+        <td title="${t.para_chave_pub}">${short(t.para_chave_pub, 24)}</td>
+        <td>${t.quantia}</td>
+        <td title="${t.txid}">${short(t.txid, 24)}</td>
+      </tr>
+    `).join("");
+    $("txs_body").innerHTML = txRows || `<tr><td colspan="5" style="color:var(--muted)">sem transações</td></tr>`;
+
+    $("state_debug").textContent = pretty({
+      config: cfg,
+      node,
+      is_leader: isLeader,
+      state: st
+    });
+  }
+
+  async function saveSelfUrl(){
+    const selfUrl = $("self_url").value;
+    const {status, json} = await apiPost("/config/self", {self_url: selfUrl});
+    $("net_result").textContent = pretty({status, ...json});
+    await refreshAll();
+  }
+
+  async function connectPeer(){
+    const peerUrl = $("peer_url").value;
+    const {status, json} = await apiPost("/peers/connect", {peer_url: peerUrl});
+    $("net_result").textContent = pretty({status, ...json});
+    await refreshAll();
+  }
+
+  async function registerUser(){
+    const body = {
+      tipo: $("reg_tipo").value,
+      nome: $("reg_nome").value,
+      email: $("reg_email").value,
+      matricula: $("reg_matricula").value,
+      frase: $("reg_frase").value,
+    };
+    const {status, json} = await apiPost("/register", body);
+    $("reg_result").textContent = pretty({status, ...json});
+    await refreshAll();
+  }
+
+  async function transfer(){
+    const body = {
+      priv: $("tx_priv").value,
+      dest_pub: $("tx_dest").value,
+      quantia: parseInt($("tx_amount").value || "0", 10),
+    };
+    const {status, json} = await apiPost("/transfer", body);
+    $("tx_result").textContent = pretty({status, ...json});
+    await refreshAll();
+  }
+
+  refreshAll();
+</script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.env
+
+# Docker volumes (quando rodar sem volume nomeado)
+data/
+*.log
+
+# Editor
+.vscode/
