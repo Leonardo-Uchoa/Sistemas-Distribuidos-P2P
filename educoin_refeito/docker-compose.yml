@@ -1,0 +1,15 @@
+services:
+  educoin:
+    build: .
+    container_name: educoin
+    environment:
+      - PORT=8000
+      - DATA_DIR=/data
+    ports:
+      - "8000:8000"
+    volumes:
+      - educoin_data:/data
+    restart: unless-stopped
+
+volumes:
+  educoin_data:
