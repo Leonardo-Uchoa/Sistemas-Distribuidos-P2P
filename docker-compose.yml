@@ -46,3 +46,39 @@ services:
       - ./data/node2:/data
     ports:
       - "8002:8000"
+
+  ring-node-a:
+    build:
+      context: .
+      dockerfile: ring.Dockerfile
+    environment:
+      - RING_NODE_ID=101
+      - RING_PORT=8101
+      - NEXT_NODE=http://ring-node-b:8102
+      - ENABLE_GUI=false
+    ports:
+      - "8101:8101"
+
+  ring-node-b:
+    build:
+      context: .
+      dockerfile: ring.Dockerfile
+    environment:
+      - RING_NODE_ID=102
+      - RING_PORT=8102
+      - NEXT_NODE=http://ring-node-c:8103
+      - ENABLE_GUI=false
+    ports:
+      - "8102:8102"
+
+  ring-node-c:
+    build:
+      context: .
+      dockerfile: ring.Dockerfile
+    environment:
+      - RING_NODE_ID=103
+      - RING_PORT=8103
+      - NEXT_NODE=http://ring-node-a:8101
+      - ENABLE_GUI=false
+    ports:
+      - "8103:8103"

@@ -6,16 +6,24 @@ import threading
 import uuid
 import logging
 from typing import List, Dict, Optional
-import tkinter as tk
-from tkinter import simpledialog, scrolledtext, messagebox
+import os
+
+try:
+    import tkinter as tk
+    from tkinter import simpledialog, scrolledtext, messagebox
+except Exception:
+    tk = None
+    simpledialog = None
+    scrolledtext = None
+    messagebox = None
 import time
 import random  # 🔹 Adicionado
 
 # ========== CONFIG ==========
-NODE_ID: int = random.randint(1, 10000)  # 🔹 Gerado aleatoriamente
-PORT: int = 8001
+NODE_ID: int = int(os.environ.get("RING_NODE_ID", random.randint(1, 10000)))
+PORT: int = int(os.environ.get("RING_PORT", 8001))
 # URL do próximo nó no anel (ajuste conforme sua topologia)
-noh_conectado: str = "http://10.80.40.253:8000"
+noh_conectado: str = os.environ.get("NEXT_NODE", "http://10.80.40.253:8000")
 
 lider: Optional[int] = None
 participante: bool = False
@@ -543,21 +551,29 @@ def run_server_in_thread(host: str = "", port: int = PORT):
 
 
 if __name__ == "__main__":
-    # Inicia servidor API em background
+    logging.info("Iniciando nó do anel ID=%s porta=%s", NODE_ID, PORT)
     httpd = run_server_in_thread("", PORT)
 
-    # Inicia thread de sincronização do líder (periódica)
     sync_thread = threading.Thread(target=sync_with_next_loop, daemon=True)
     sync_thread.start()
 
-    # Abre GUI
-    root = tk.Tk()
-    base_url = f"http://localhost:{PORT}"
-    gui = ControlGUI(root, base_url)
+    enable_gui = os.environ.get("ENABLE_GUI", "true").lower() == "true"
+    if enable_gui and tk is not None:
+        root = tk.Tk()
+        base_url = f"http://localhost:{PORT}"
+        gui = ControlGUI(root, base_url)
 
-    try:
-        root.mainloop()
-    except KeyboardInterrupt:
-        logging.info("Fechando aplicação...")
-        httpd.shutdown()
-        httpd.server_close()
+        try:
+            root.mainloop()
+        except KeyboardInterrupt:
+            logging.info("Fechando aplicação...")
+    else:
+        logging.info("Executando nó em modo headless (sem GUI)")
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            logging.info("Interrompido pelo usuário")
+
+    httpd.shutdown()
+    httpd.server_close()

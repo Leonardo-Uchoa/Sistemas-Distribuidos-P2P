@@ -1,67 +1,78 @@
-# Educoin - Sistemas Distribuídos P2P
+# Educoin - Rede P2P Acadêmica
 
-Este repositório agora contém o protótipo **Educoin**, uma criptomoeda acadêmica pensada para a cadeira de Sistemas Distribuídos. O objetivo principal é permitir que escolas criem contas para estudantes, transfiram moedas pela rede e mantenham o estado sincronizado por meio de um líder.
+Este repositório contém o protótipo **Educoin**, uma criptomoeda de uso escolar construída sobre conceitos de Sistemas Distribuídos. Após esta iteração o sistema oferece:
 
-## O que foi feito
+- **Gestão completa de usuários/contas** com campos obrigatórios (nome, CPF, e-mail, categoria) e autenticação por senha.
+- **Geração e armazenamento formal de chaves**: cada cadastro cria automaticamente chave pública/privada e gera um arquivo JSON exportável (pasta `data/exports`).
+- **Ledger persistente + blockchain**: toda transferência gera um bloco com hash encadeado, guardado em `data/ledger.json`. Logs individuais por conta são gravados em CSV (pasta `data/logs`).
+- **Interface web com login** para criar contas (somente líder), transferir moedas autenticado, baixar log/export e visualizar a blockchain.
+- **API FastAPI** com endpoints de autenticação, transações, blockchain e replicação entre nós. Seguidores encaminham operações ao líder automaticamente.
+- **Stack Docker Compose** que sobe líder + 2 seguidores + serviço de ring legado (para eleição Lamport/Bully). Cada serviço possui volume próprio.
 
-1. **Modelagem do ledger**: criei classes para contas e transações com validações básicas de chave privada e saldo. Os dados ficam persistidos em disco (`LedgerStore`) e podem sobreviver ao restart dos nós.
-2. **API FastAPI + UI web**: implementei uma API P2P com FastAPI capaz de criar contas, executar transferências, expor snapshots e replicar o ledger. A mesma aplicação entrega uma interface web simples para visualizar contas/transações e interagir com o sistema.
-3. **Sincronização via líder**: nós seguidores encaminham requisições para o líder configurado, enquanto o líder replica o ledger completo para os demais por meio do endpoint `/replicate`, respeitando um token compartilhado.
-4. **Stack Docker**: foi adicionada a pasta `educoin_project/` com Dockerfile e `docker-compose.yml` que sobem um líder e dois seguidores automaticamente, cada um com volume próprio para persistência.
-5. **Bootstrap/sync**: incluí endpoints utilitários (`/status`, `/sync`, `/bootstrap`) para ajudar em diagnósticos e para seguidores puxarem o ledger completo do líder quando necessário.
-
-## Estrutura principal
+## Estrutura
 
 ```
-educoin_project/
-  app/
-    ledger.py        # regras de contas/transações
-    storage.py       # persistência em JSON thread-safe
-    p2p.py           # broadcast e proxy para o líder
-    main.py          # FastAPI + UI
-    templates/index.html
-  requirements.txt
-  Dockerfile
+.
+├── educoin_project
+│   ├── app
+│   │   ├── auth.py          # tokens + hashing de credenciais
+│   │   ├── blockchain.py    # representação de blocos
+│   │   ├── ledger.py        # regras de usuários, transferências, logs
+│   │   ├── models.py        # dataclasses de domínio
+│   │   ├── p2p.py           # proxy e replicação
+│   │   ├── storage.py       # persistência JSON thread-safe
+│   │   ├── templates/index.html  # UI
+│   │   └── main.py          # FastAPI
+│   ├── Dockerfile
+│   └── requirements.txt
+├── client_ring.py           # serviço de eleição/relógio Lamport
+├── docker-compose.yml       # sobe líder, seguidores e nós de anel
+└── README.md
 ```
 
-## Como executar via Docker Compose
+## Executando com Docker Compose
 
-1. **Build e subida da stack**
+1. **Build e subida**
    ```bash
    docker compose up --build
    ```
-   Isso cria 3 serviços: `educoin-leader` (porta 8000), `educoin-node-1` (porta 8001) e `educoin-node-2` (porta 8002). Cada nó tem um volume em `./data/*` para persistir seu ledger.
+   Serviços:
+   - `educoin-leader` → FastAPI líder em `http://localhost:8000`
+   - `educoin-node-1` → seguidor (`http://localhost:8001`)
+   - `educoin-node-2` → seguidor (`http://localhost:8002`)
+   - `ring-node-a/b/c` → nós herdados do `client_ring.py` responsáveis pela eleição Bully + relógio Lamport (cada um expõe portas 8101-8103) replicando estado do líder.
 
-2. **Acessar a interface**
-   Abra `http://localhost:8000` para o líder (interface completa) ou `http://localhost:8001` / `:8002` para visualizar os seguidores. Todos expõem a mesma UI.
+2. **Login**
+   - Acesse `http://localhost:8000`, cadastre um usuário inicial (ex.: diretor) e salve a private key + arquivo exportado.
+   - Use o CPF/senha no formulário de login; o token fica armazenado no browser (variável JS `authToken`).
 
-3. **Criar conta**
-   - Use o formulário "Criar conta" na UI ou via API (`POST /accounts` com `{ "name": "Fulano" }`).
-   - O líder retorna o `private_key`. Salve-o, pois essa informação não é mostrada novamente.
+3. **Criar contas**
+   - Somente o líder aceita `POST /accounts`. A UI envia nome, CPF, email, senha e categoria (`aluno`, `professor`, `diretor`).
+   - A resposta já entrega `private_key` e o caminho do arquivo salvo em `data/exports/<account>.json`.
 
-4. **Transferir educoins**
-   - No formulário "Transferir Educoins" informe `from_account`, `private_key`, `to_account` e `amount`.
-   - A API valida saldo e chave privada antes de registrar a transação.
+4. **Transferir moedas**
+   - Após login, informe `from_account`, `private_key`, `to_account` e `amount`.
+   - A operação gera um bloco novo (`GET /blockchain`) e logs CSV em `data/logs/<account>.csv`.
 
-5. **Sincronização manual (opcional)**
-   - Em seguidores: `curl -X POST http://localhost:8001/bootstrap` para puxar um snapshot completo caso tenham iniciado antes do líder.
+5. **Exportar/Histórico**
+   - `GET /accounts/{id}/log` (autenticado com o próprio dono) baixa o CSV da conta.
+   - `GET /accounts/{id}/export` (diretor ou dono) devolve JSON com dados públicos.
 
-## Endpoints importantes
+6. **Replicação/Bootstrap**
+   - Seguidores usam `LEADER_URL` para encaminhar transações. Caso iniciem antes do líder, rode `curl -X POST http://localhost:8001/bootstrap`.
 
-- `GET /` – interface web.
-- `GET /status` – mostra metadados do nó (id, se é líder, peers, contagens).
-- `GET /accounts` – snapshot completo de contas e transações.
-- `POST /accounts` – cria conta (seguidores encaminham para o líder automaticamente).
-- `POST /transactions` – transfere educoins.
-- `POST /replicate` – usado pelo líder para enviar snapshot aos peers (proteção por header `x-leader-token`).
-- `POST /bootstrap` – seguidores puxam snapshot inicial do líder.
+## Ring Legacy / Eleição
 
-## Próximos passos sugeridos
+O arquivo `client_ring.py` continua disponível para rodar nós de eleição. No compose eles sobem no modo headless, conectados em anel e disparando/propagando eleição Bully com relógios de Lamport. A sincronização com o novo ledger ocorre via chamadas HTTP ao líder (rotas `/sync_request` → `/accounts`). Assim mantemos a disciplina original demonstrando procura de nós, envio de criptomoedas e armazenamento em arquivo.
 
-- Implementar autenticação adequada (ex: assinaturas digitais) e histórico imutável baseado em blockchain real.
-- Adicionar consenso/election automatizada (Raft ou Bully) para troca de liderança em runtime.
-- Criar testes automatizados que cubram transferências concorrentes e validação de replicação.
+## Testes rápidos
 
-## Legacy
+```bash
+python -m py_compile client_ring.py atividade.py educoin_project/app/*.py
+```
 
-Os arquivos originais (`client_ring.py`, `atividade.py`) foram mantidos para referência do antigo protótipo de mural, mas o fluxo principal da Educoin está concentrado em `educoin_project/`.
+## Próximos passos
+
+- Implementar consenso real (ex.: Raft) para promover automaticamente um seguidor a líder e atualizar o `LEADER_URL` dos demais.
+- Adicionar assinatura digital baseada em chave pública das transações/blocos.
+- Cobrir toda a API com testes automatizados (pytest + HTTPX AsyncClient) e pipeline CI.
