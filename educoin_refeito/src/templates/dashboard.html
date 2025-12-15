@@ -324,6 +324,7 @@
       <span class="badge">leader_url: <span style="font-family:var(--mono)">${leaderUrl}</span></span>
       <span class="badge">meu_url: <span style="font-family:var(--mono)">${selfUrl}</span></span>
       <span class="badge">peers: <b>${(cfg.peers||[]).length}</b></span>
+      <span class="badge">Lamport: <b>${st.lamport_clock ?? 0}</b></span>
     `;
 
     if(cfg.self_url) $("self_url").value = cfg.self_url;

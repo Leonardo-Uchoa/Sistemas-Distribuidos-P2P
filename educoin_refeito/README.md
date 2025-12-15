@@ -10,10 +10,18 @@
 - **Rede P2P** com:
   - configuração do **meu_url** e conexão a peers **pela interface** (`/dashboard`);
   - **líder** que mantém o estado mais atual e faz broadcast (`/sync`) aos peers.
+- **Relógio lógico (Lamport)**:
+  - cada mutação de estado incrementa um contador lógico persistido em `state.json`;
+  - todas as mensagens levam esse contador para manter causalidade/Lamport entre nós.
+- **Reconexão automática de peers**:
+  - peers têm *health-check* contínuo e são removidos quando ficam inativos;
+  - nós isolados tentam se reconectar periodicamente a peers conhecidos (persistidos em `config.json`).
+- **Persistência local** com `state.json`/`config.json`, incluindo membros, transações e peers conhecidos.
 - **Eleição**:
   - Cada nó recebe um **ID aleatório** ao iniciar.
   - O **líder só muda quando o líder atual cai/desconecta**.
   - Quando isso acontece, o maior **ID** entre os nós ativos vira líder.
+  - A eleição percorre os nós em **anel (Ring Election)**: cada nó encaminha a mensagem ao próximo peer conhecido até que o resultado volte ao iniciador, que anuncia o novo líder.
 
 > Observação: isso não é uma blockchain “com consenso real” (PoW/PoS), mas atende ao objetivo didático de
 > replicação de estado + coordenação (líder) + tolerância a falhas (eleição).
