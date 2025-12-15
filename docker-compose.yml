@@ -12,6 +12,8 @@ services:
       - PEER_NODES=http://educoin-node-1:8000,http://educoin-node-2:8000
       - LEADER_TOKEN=super-secret-token
       - EDUCOIN_DATA_PATH=/data/ledger.json
+      - RING_TOKEN=ring-secret
+      - RING_ENTRYPOINT=http://ring-node-a:8101
     volumes:
       - ./data/leader:/data
     ports:
@@ -27,6 +29,8 @@ services:
       - LEADER_URL=http://educoin-leader:8000
       - LEADER_TOKEN=super-secret-token
       - EDUCOIN_DATA_PATH=/data/ledger.json
+      - RING_TOKEN=ring-secret
+      - RING_ENTRYPOINT=http://ring-node-b:8102
     volumes:
       - ./data/node1:/data
     ports:
@@ -42,6 +46,8 @@ services:
       - LEADER_URL=http://educoin-leader:8000
       - LEADER_TOKEN=super-secret-token
       - EDUCOIN_DATA_PATH=/data/ledger.json
+      - RING_TOKEN=ring-secret
+      - RING_ENTRYPOINT=http://ring-node-c:8103
     volumes:
       - ./data/node2:/data
     ports:
@@ -56,6 +62,9 @@ services:
       - RING_PORT=8101
       - NEXT_NODE=http://ring-node-b:8102
       - ENABLE_GUI=false
+      - LEDGER_NOTIFY=http://educoin-leader:8000,http://educoin-node-1:8000,http://educoin-node-2:8000
+      - LEDGER_MAP=101:leader@http://educoin-leader:8000,102:node-1@http://educoin-node-1:8000,103:node-2@http://educoin-node-2:8000
+      - RING_TOKEN=ring-secret
     ports:
       - "8101:8101"
 
@@ -68,6 +77,9 @@ services:
       - RING_PORT=8102
       - NEXT_NODE=http://ring-node-c:8103
       - ENABLE_GUI=false
+      - LEDGER_NOTIFY=http://educoin-leader:8000,http://educoin-node-1:8000,http://educoin-node-2:8000
+      - LEDGER_MAP=101:leader@http://educoin-leader:8000,102:node-1@http://educoin-node-1:8000,103:node-2@http://educoin-node-2:8000
+      - RING_TOKEN=ring-secret
     ports:
       - "8102:8102"
 
@@ -80,5 +92,8 @@ services:
       - RING_PORT=8103
       - NEXT_NODE=http://ring-node-a:8101
       - ENABLE_GUI=false
+      - LEDGER_NOTIFY=http://educoin-leader:8000,http://educoin-node-1:8000,http://educoin-node-2:8000
+      - LEDGER_MAP=101:leader@http://educoin-leader:8000,102:node-1@http://educoin-node-1:8000,103:node-2@http://educoin-node-2:8000
+      - RING_TOKEN=ring-secret
     ports:
       - "8103:8103"

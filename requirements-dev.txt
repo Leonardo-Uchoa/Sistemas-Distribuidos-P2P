@@ -1,0 +1,2 @@
+-r educoin_project/requirements.txt
+pytest==8.2.2

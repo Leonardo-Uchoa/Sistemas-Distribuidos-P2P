@@ -24,11 +24,32 @@ NODE_ID: int = int(os.environ.get("RING_NODE_ID", random.randint(1, 10000)))
 PORT: int = int(os.environ.get("RING_PORT", 8001))
 # URL do próximo nó no anel (ajuste conforme sua topologia)
 noh_conectado: str = os.environ.get("NEXT_NODE", "http://10.80.40.253:8000")
+LEDGER_NOTIFY = [url.strip() for url in os.environ.get("LEDGER_NOTIFY", "").split(",") if url.strip()]
+LEDGER_MAP_RAW = os.environ.get("LEDGER_MAP", "")
+RING_TOKEN = os.environ.get("RING_TOKEN", "ring-secret")
 
 lider: Optional[int] = None
 participante: bool = False
 mural: List[Dict] = []  # mural compartilhado (lista de mensagens únicas)
 # ============================
+
+
+def _load_mapping(raw: str) -> Dict[str, Dict[str, str]]:
+    mapping: Dict[str, Dict[str, str]] = {}
+    pairs = [item.strip() for item in raw.split(",") if item.strip()]
+    for item in pairs:
+        if ":" not in item or "@" not in item:
+            continue
+        ring_id, rest = item.split(":", 1)
+        ledger_id, ledger_url = rest.split("@", 1)
+        mapping[ring_id.strip()] = {
+            "ledger_id": ledger_id.strip(),
+            "ledger_url": ledger_url.strip(),
+        }
+    return mapping
+
+
+LEDGER_MAP = _load_mapping(LEDGER_MAP_RAW)
 
 lock = threading.Lock()
 TIMEOUT_S = 3
@@ -120,6 +141,23 @@ def async_post(url: str, payload: dict, max_retries: int = REQUEST_RETRIES):
     threading.Thread(target=_run, daemon=True).start()
 
 
+def notify_ledgers_of_election(ring_leader: int):
+    info = LEDGER_MAP.get(str(ring_leader))
+    if not info:
+        logging.warning("Nenhum mapeamento para ring leader %s", ring_leader)
+        return
+    payload = {"leader_id": info["ledger_id"], "leader_url": info["ledger_url"]}
+    headers = {"x-ring-token": RING_TOKEN}
+    targets = LEDGER_NOTIFY or [info["ledger_url"]]
+    for target in targets:
+        url = target.rstrip("/") + "/election/leader"
+        try:
+            resp = session.post(url, json=payload, headers=headers, timeout=TIMEOUT_S)
+            logging.info("Notifiquei %s sobre novo líder %s (status=%s)", url, payload["leader_id"], resp.status_code)
+        except requests.RequestException as exc:
+            logging.warning("Falha ao notificar %s: %s", url, exc)
+
+
 def sync_with_next_once(destino: Optional[str] = None) -> int:
     """Tenta buscar /mural do destino e incorporar mensagens novas no mural local.
     Retorna o número de mensagens adicionadas.
@@ -184,6 +222,15 @@ class NossoHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+    def _relay_response(self, resp: requests.Response):
+        content = resp.content
+        self.send_response(resp.status_code)
+        content_type = resp.headers.get("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(content)))
+        self.end_headers()
+        self.wfile.write(content)
 
     def log_message(self, format, *args):
         # Redireciona logs do BaseHTTPRequestHandler para logging
@@ -258,6 +305,7 @@ class NossoHandler(http.server.BaseHTTPRequestHandler):
                     lider = NODE_ID
                     participante = False
                     destino = noh_conectado
+                notify_ledgers_of_election(NODE_ID)
                 # antes de enviar notificação de eleito, incrementa (evento local: enviar)
                 vc_increment()
                 async_post(destino + "/eleito", {"eleito": NODE_ID})
@@ -288,12 +336,48 @@ class NossoHandler(http.server.BaseHTTPRequestHandler):
                 participante = False
                 sou_lider = NODE_ID == eleito
                 destino = noh_conectado
+            notify_ledgers_of_election(eleito)
             if not sou_lider:
                 # antes de encaminhar, incrementa VC (evento de enviar)
                 vc_increment()
                 async_post(destino + "/eleito", {"eleito": eleito})
             self._send_json(200, {"mensagem": "Líder reconhecido", "leader": eleito})
             return
+
+        elif self.path.startswith("/txn_event"):
+            tx_payload = data.get("transaction")
+            token = data.get("token")
+            if not isinstance(tx_payload, dict) or not token:
+                self._send_json(400, {"detail": "payload inválido para txn_event"})
+                return
+            with lock:
+                current_leader = lider
+                destino = noh_conectado
+            if current_leader is None:
+                self._send_json(503, {"detail": "Líder desconhecido no momento"})
+                return
+            if current_leader == NODE_ID:
+                info = LEDGER_MAP.get(str(NODE_ID))
+                if not info:
+                    self._send_json(500, {"detail": "Ledger não mapeado para este nó"})
+                    return
+                ledger_url = info["ledger_url"].rstrip("/")
+                headers = {"Authorization": f"Bearer {token}"}
+                try:
+                    vc_increment()
+                    resp = session.post(ledger_url + "/transactions", json=tx_payload, headers=headers, timeout=TIMEOUT_S)
+                    self._relay_response(resp)
+                except requests.RequestException as exc:
+                    self._send_json(502, {"detail": f"Falha ao acionar ledger líder: {exc}"})
+                return
+            else:
+                try:
+                    vc_increment()
+                    resp = session.post(destino + "/txn_event", json=data, timeout=TIMEOUT_S)
+                    self._relay_response(resp)
+                except requests.RequestException as exc:
+                    self._send_json(502, {"detail": f"Falha ao encaminhar txn_event: {exc}"})
+                return
 
         # -------- MURAL --------
         elif self.path.startswith("/mural"):
