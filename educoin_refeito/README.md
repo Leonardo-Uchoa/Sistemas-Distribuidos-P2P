@@ -17,6 +17,7 @@
   - peers têm *health-check* contínuo e são removidos quando ficam inativos;
   - nós isolados tentam se reconectar periodicamente a peers conhecidos (persistidos em `config.json`).
 - **Persistência local** com `state.json`/`config.json`, incluindo membros, transações e peers conhecidos.
+- **Cadastro seguro**: cada usuário informa **duas frases diferentes** (uma gera a chave pública e outra gera a chave privada). A chave privada nunca é armazenada, apenas um hash que permite validar transferências.
 - **Eleição**:
   - Cada nó recebe um **ID aleatório** ao iniciar.
   - O **líder só muda quando o líder atual cai/desconecta**.

@@ -174,6 +174,7 @@
 
       <div class="card">
         <h2>Cadastro</h2>
+        <div class="hint">Use frases diferentes para gerar as chaves. A frase da chave privada deve ficar só com você.</div>
         <label>Tipo</label>
         <select id="reg_tipo">
           <option value="aluno">Aluno (100)</option>
@@ -190,8 +191,11 @@
         <label>Matrícula</label>
         <input id="reg_matricula" placeholder="ex.: 20251234" />
 
-        <label>Frase-secreta (gera chave)</label>
-        <input id="reg_frase" placeholder="digite algo que você não esqueça" />
+        <label>Frase para chave <b>pública</b></label>
+        <input id="reg_frase_pub" placeholder="algo que você compartilha" />
+
+        <label>Frase para chave <b>privada</b> (não compartilhe)</label>
+        <input id="reg_frase_priv" placeholder="algo só você sabe" />
 
         <div class="spacer"></div>
         <button style="width:100%" onclick="registerUser()">Cadastrar</button>
@@ -401,7 +405,8 @@
       nome: $("reg_nome").value,
       email: $("reg_email").value,
       matricula: $("reg_matricula").value,
-      frase: $("reg_frase").value,
+      frase_pub: $("reg_frase_pub").value,
+      frase_priv: $("reg_frase_priv").value,
     };
     const {status, json} = await apiPost("/register", body);
     $("reg_result").textContent = pretty({status, ...json});

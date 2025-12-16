@@ -11,17 +11,21 @@ def sha256_hex(s: str) -> str:
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
-def gerar_chaves(frase: str) -> Tuple[str, str, str]:
+def gerar_chaves(frase_pub: str, frase_priv: str) -> Tuple[str, str, str]:
     """
-    Gera (pub, priv, priv_hash) a partir de uma frase.
-    - pub e priv são hashes diferentes (requisito do trabalho).
-    - priv_hash é o hash do priv (permite localizar o dono sem armazenar priv).
+    Gera (pub, priv, priv_hash) a partir de duas frases independentes.
+    - pub deriva de frase_pub
+    - priv deriva de frase_priv
+    - priv_hash permite identificar o dono sem guardar a priv
     """
-    frase = (frase or "").strip()
-    if not frase:
-        raise ValueError("Frase-secreta vazia.")
-    pub = sha256_hex("PUB:" + frase)
-    priv = sha256_hex("PRIV:" + frase)
+    frase_pub = (frase_pub or "").strip()
+    frase_priv = (frase_priv or "").strip()
+    if not frase_pub or not frase_priv:
+        raise ValueError("Informe frases para chave pública e privada.")
+    if frase_pub == frase_priv:
+        raise ValueError("Use frases diferentes para chave pública e privada.")
+    pub = sha256_hex("PUB:" + frase_pub)
+    priv = sha256_hex("PRIV:" + frase_priv)
     priv_hash = sha256_hex("PRIVHASH:" + priv)
     return pub, priv, priv_hash
 
@@ -56,9 +60,10 @@ def criar_usuario(payload: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
     nome = (payload.get("nome") or "").strip()
     email = (payload.get("email") or "").strip()
     matricula = (payload.get("matricula") or "").strip()
-    frase = (payload.get("frase") or "").strip()
+    frase_pub = (payload.get("frase_pub") or payload.get("frase") or "").strip()
+    frase_priv = (payload.get("frase_priv") or "").strip()
 
-    pub, priv, priv_hash = gerar_chaves(frase)
+    pub, priv, priv_hash = gerar_chaves(frase_pub, frase_priv)
 
     user = {
         "tipo": tipo,
