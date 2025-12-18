@@ -28,9 +28,9 @@ os.makedirs(DATA_DIR, exist_ok=True)
 def _default_state() -> Dict[str, Any]:
     return {
         "leader_url": None,
-        "members": {},      # url -> {id:int, last_seen: float}
-        "usuarios": {},     # chave_pub -> user dict
-        "txs": [],          # list[tx]
+        "members": {},      
+        "usuarios": {},    
+        "txs": [],        
         "last_updated": None,
         "lamport_clock": 0,
     }
@@ -58,20 +58,16 @@ def _atomic_save_json(path: str, data: Dict[str, Any]) -> None:
 state: Dict[str, Any] = _load_json(STATE_PATH, _default_state())
 config: Dict[str, Any] = _load_json(CONFIG_PATH, _default_config())
 
-# Garante chaves mínimas
 for k, v in _default_state().items():
     state.setdefault(k, v)
 for k, v in _default_config().items():
     config.setdefault(k, v)
 
-# ID do nó: aleatório a cada execução (requisito)
 NODE_ID = random.randint(1, 9999)
 NODE_ID_STR = f"{NODE_ID:04d}"
 
-# Lock para evitar gravação concorrente
 _lock = threading.RLock()
 
-# Falhas de peers monitoradas em memória
 _peer_failures: Dict[str, int] = {}
 
 def _clock_value() -> int:
@@ -101,7 +97,7 @@ def _clock_receive_event(remote_clock: Optional[int]) -> int:
 # ============================================
 # Funções de rede / eleição
 # ============================================
-ACTIVE_WINDOW_SEC = 12.0  # um nó é "ativo" se foi visto nos últimos X segundos
+ACTIVE_WINDOW_SEC = 12.0
 LEADER_FAILS_TO_ELECT = 3
 PEER_FAILS_TO_REMOVE = 3
 PEER_HEALTH_INTERVAL_SEC = 5.0
@@ -163,10 +159,8 @@ def _elect_leader_local(reason: str) -> None:
     if not self_url:
         return
 
-    # Atualiza "eu" como membro ativo
     _mark_member(self_url, NODE_ID)
 
-    # Candidatos ativos
     candidates: list[Tuple[int, str]] = []
     for url, info in (state.get("members") or {}).items():
         try:
@@ -190,11 +184,9 @@ def _elect_leader_local(reason: str) -> None:
         _clock_send_event()
         _save_all()
 
-    # Se eu virei líder: broadcast do estado (para não ficar inconsistente)
     if winner_url == self_url:
         _broadcast_state(note=f"eleição ({reason}) -> líder {winner_id}")
     else:
-        # se outro virou líder, tenta puxar estado dele
         _pull_state_from_leader()
 
 def _ensure_leader_or_elect() -> None:
@@ -204,7 +196,6 @@ def _ensure_leader_or_elect() -> None:
         return
 
     if state.get("leader_url") is None:
-        # bootstrap: sozinho até conectar com alguém
         with _lock:
             state["leader_url"] = self_url
             _mark_member(self_url, NODE_ID)
@@ -212,7 +203,6 @@ def _ensure_leader_or_elect() -> None:
             _save_all()
         return
 
-    # líder existe: só muda se cair
     if not _leader_reachable():
         with _lock:
             state["leader_url"] = None
@@ -233,7 +223,6 @@ def _pull_state_from_leader() -> bool:
         j = r.json()
         ledger = j.get("state") or {}
         remote_clock = ledger.get("lamport_clock")
-        # Mantém config local, mas atualiza ledger + leader + members
         with _lock:
             state["leader_url"] = ledger.get("leader_url", leader)
             state["usuarios"] = ledger.get("usuarios", {})
@@ -255,7 +244,7 @@ def _broadcast_state(note: str = "") -> Dict[str, Any]:
     """Líder envia o estado completo aos peers."""
     if not _is_leader():
         return {"ok": False, "msg": "não sou líder"}
-    peers = list(dict.fromkeys(config.get("peers") or []))  # unique
+    peers = list(dict.fromkeys(config.get("peers") or []))
     clock = _clock_send_event()
     _save_all()
     ok, fail = [], []
@@ -683,7 +672,6 @@ def config_self():
     with _lock:
         config["self_url"] = self_url
         _mark_member(self_url, NODE_ID)
-        # bootstrap: se não tem líder definido, eu sou líder (até cair)
         if not state.get("leader_url"):
             state["leader_url"] = self_url
             _clock_send_event()
@@ -736,8 +724,6 @@ def p2p_join():
 
     self_url = _get_self_url()
     if not self_url:
-        # eu ainda não tenho meu_url, mas posso responder com meu endereço "desconhecido"
-        # (recomendado: usuário setar self_url antes de conectar)
         pass
 
     _ensure_leader_or_elect()
@@ -749,7 +735,6 @@ def p2p_join():
             _mark_member(self_url, NODE_ID)
         _save_all()
 
-    # Se eu sou líder, já sincronizo o peer
     if _is_leader():
         try:
             clock = _clock_send_event()
@@ -800,7 +785,6 @@ def sync():
         state["last_updated"] = payload.get("last_updated", state.get("last_updated"))
         _clock_receive_event(payload.get("lamport_clock"))
 
-        # merge members
         members = payload.get("members") or {}
         for url, info in members.items():
             state.setdefault("members", {})[url] = info
@@ -839,7 +823,6 @@ def register():
         fwd = _forward_to_leader("/register", request.get_json(silent=True) or {})
         if fwd is not None:
             return fwd
-        # líder caiu e ainda não conseguimos eleger? tenta eleger e continuar
         _ensure_leader_or_elect()
         if not _is_leader():
             return jsonify({"ok": False, "msg": "Líder indisponível. Tente novamente."}), 503
@@ -852,9 +835,7 @@ def register():
 
     pub = user["chave_pub"]
     with _lock:
-        # impede duplicar pub
         if pub in state["usuarios"]:
-            # mantém saldo e dados antigos, mas devolve msg
             existing = state["usuarios"][pub]
             return jsonify({
                 "ok": True,
@@ -875,7 +856,7 @@ def register():
         "msg": "Cadastro realizado com sucesso (estado propagado).",
         "user": user,
         "chave_pub": pub,
-        "priv": priv,  # mostrado uma vez
+        "priv": priv,
         "broadcast": b.get("broadcast", {}),
     })
 
@@ -949,7 +930,6 @@ def _leader_watchdog_loop():
                 fails += 1
 
             if fails >= LEADER_FAILS_TO_ELECT:
-                # leader caiu -> eleição
                 with _lock:
                     state["leader_url"] = None
                     _clock_send_event()
@@ -958,7 +938,6 @@ def _leader_watchdog_loop():
                 fails = 0
 
         except Exception:
-            # nunca derruba a thread
             pass
 
 def _leader_ping_peers_loop():
@@ -987,7 +966,6 @@ def _leader_ping_peers_loop():
                         _save_all()
                         _peer_failures.pop(p, None)
                 except Exception:
-                    # só deixa last_seen expirar
                     _handle_peer_failure(p)
         except Exception:
             pass
@@ -1039,7 +1017,7 @@ def _auto_reconnect_loop():
             for peer_url in candidates:
                 resp, status = _connect_peer_flow(peer_url, reason="auto")
                 if status == 200:
-                    break  # já reconectamos alguém
+                    break
         except Exception:
             pass
 
