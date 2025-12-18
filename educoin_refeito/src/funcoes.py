@@ -73,13 +73,11 @@ def criar_usuario(payload: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
         "chave_pub": pub,
         "priv_hash": priv_hash,
         "saldo": saldo_inicial_por_tipo(tipo),
-        "criado_em": utc_now_iso(),  # sempre existe (fix do bug do 500)
+        "criado_em": utc_now_iso(),
     }
     return user, priv
 
 def assinar_tx(priv: str, dest_pub: str, quantia: int, timestamp: str) -> str:
-    # Assinatura didática (não é ECDSA/Ed25519).
-    # Serve para mostrar integridade e rastreabilidade.
     base = f"{priv}|{dest_pub}|{quantia}|{timestamp}"
     return sha256_hex("SIG:" + base)
 
@@ -137,7 +135,6 @@ def aplicar_transferencia(state: Dict[str, Any], priv: str, dest_pub: str, quant
     if sender.get("saldo", 0) < quantia:
         raise ValueError("Saldo insuficiente.")
 
-    # aplica
     sender["saldo"] -= quantia
     users[dest_pub]["saldo"] += quantia
 
